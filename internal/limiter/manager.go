@@ -3,6 +3,7 @@ package limiter
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // BucketManager manages a pool of TokenBuckets, one per key.
@@ -45,5 +46,48 @@ func (manager *BucketManager) Allow(ctx context.Context, key string) (bool, erro
 		return newBucket.Allow(ctx, key)
 	} else {
 		return bucket.Allow(ctx, key)
+	}
+}
+
+// WindowManager manages a pool of SlidingWindows, one per key.
+// Windows are created on demand and routed by key on each Allow call.
+// All operations are safe for concurrent use.
+type WindowManager struct {
+	mu      sync.RWMutex
+	clients map[string]*SlidingWindow
+	limit   int64
+	window  time.Duration
+}
+
+// NewWindowManager returns a WindowManager ready for use.
+// limit and window are passed to each SlidingWindow created on demand —
+// see NewSlidingWindow for their semantics.
+func NewWindowManager(limit int64, window time.Duration) *WindowManager {
+	wm := WindowManager{
+		clients: make(map[string]*SlidingWindow),
+		limit:   limit,
+		window:  window,
+	}
+	return &wm
+}
+
+// Allow returns true if the given key is within its rate limit, false if it should
+// be throttled. A window is created for the key if one does not already exist.
+// It uses double-checked locking to minimise contention on the common path.
+func (manager *WindowManager) Allow(ctx context.Context, key string) (bool, error) {
+	manager.mu.RLock()
+	sw, exists := manager.clients[key]
+	manager.mu.RUnlock()
+	if exists {
+		return sw.Allow(ctx, key)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if sw, exists := manager.clients[key]; !exists {
+		newWindow := NewSlidingWindow(manager.limit, manager.window)
+		manager.clients[key] = newWindow
+		return newWindow.Allow(ctx, key)
+	} else {
+		return sw.Allow(ctx, key)
 	}
 }
