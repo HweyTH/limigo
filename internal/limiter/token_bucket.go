@@ -43,7 +43,7 @@ func (bucket *TokenBucket) Allow(ctx context.Context, key string) (bool, error) 
 		bucket.count = bucket.capacity
 	}
 	bucket.lastRefill = time.Now()
-	if bucket.count > 0 {
+	if bucket.count >= 1 {
 		bucket.count -= 1
 		return true, nil
 	}
