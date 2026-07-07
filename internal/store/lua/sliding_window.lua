@@ -19,7 +19,8 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start)
 local num_requests = redis.call('ZCARD', KEYS[1])
 
 if num_requests < tonumber(ARGV[1]) then
-    redis.call('ZADD', KEYS[1], now_ms, tostring(now_ms))
+    local member = tostring(time[1]) .. ':' .. tostring(time[2])
+    redis.call('ZADD', KEYS[1], now_ms, member)
     redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
 
     return 1
