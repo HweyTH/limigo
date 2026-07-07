@@ -472,15 +472,111 @@ func TestAllowTokenBucket(t *testing.T) {
 	})
 
 	t.Run("RefillAllowsAfterWaiting", func(t *testing.T) {
+		capacity := float64(2)
+		rate := float64(10)
+		key := redisTestKey(t, "happy-refill")
+
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
+		}
+		if !allowed {
+			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on allowed call %d: %v", 2, err)
+		}
+		if !allowed {
+			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 2)
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on drained-bucket call %d: %v", 3, err)
+		}
+		if allowed {
+			t.Fatalf("expected call %d to be denied after bucket was drained", 3)
+		}
+
+		time.Sleep(120 * time.Millisecond)
+
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error after refill wait on call %d: %v", 4, err)
+		}
+		if !allowed {
+			t.Fatalf("expected call %d to be allowed after one token refilled", 4)
+		}
 	})
 
 	t.Run("PartialRefillStillDenies", func(t *testing.T) {
+		capacity := float64(1)
+		rate := float64(10)
+		key := redisTestKey(t, "partial-refill")
+
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
+		}
+		if !allowed {
+			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on empty-bucket call %d: %v", 2, err)
+		}
+		if allowed {
+			t.Fatalf("expected call %d to be denied because bucket has no tokens", 2)
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error after partial refill on call %d: %v", 3, err)
+		}
+		if allowed {
+			t.Fatalf("expected call %d to be denied because partial refill is less than one token", 3)
+		}
 	})
 
 	t.Run("RefillNotAllowedPastCapacity", func(t *testing.T) {
-	})
+		capacity := float64(2)
+		rate := float64(10)
+		key := redisTestKey(t, "refill-at-capacity")
 
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
+		}
+		if !allowed {
+			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
+		}
+
+		time.Sleep(1000 * time.Millisecond)
+
+		for call := 2; call <= int(capacity)+1; call++ {
+			allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+			if err != nil {
+				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
+			}
+			if !allowed {
+				t.Fatalf("expected call %d to be allowed while bucket has refilled capacity", call)
+			}
+		}
+		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on over-capacity call %d: %v", 4, err)
+		}
+		if allowed {
+			t.Fatalf("expected call %d to be denied because refill must not exceed bucket capacity", 4)
+		}
+	})
 	t.Run("ConcurrentBurstAllowsOnlyCapacity", func(t *testing.T) {
+
 	})
 
 	t.Run("IndependentKeysDoNotShareBucket", func(t *testing.T) {
