@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Tests for RingBuffer struct
+// TestRingBuffer verifies ring-buffer count tracking, eviction, and wrap-around.
 func TestRingBuffer(t *testing.T) {
 	rb := NewRingBuffer(3)
 	var oldestTest time.Time
@@ -39,7 +39,7 @@ func TestRingBuffer(t *testing.T) {
 
 }
 
-// Tests for SlidingWindow struct for business logic
+// TestSlidingWindow verifies limit enforcement and expiry of old requests.
 func TestSlidingWindow(t *testing.T) {
 	windowDuration := 100 * time.Millisecond
 	limit := int64(2)
@@ -76,7 +76,7 @@ func TestSlidingWindow(t *testing.T) {
 	}
 }
 
-// Tests for SlidingWindow struct for concurrency
+// TestSlidingWindowConcurrency verifies that concurrent requests are capped at the limit.
 func TestSlidingWindowConcurrency(t *testing.T) {
 	limit := int64(50)
 	windowDuration := 1 * time.Second

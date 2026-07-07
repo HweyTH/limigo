@@ -14,21 +14,27 @@ import (
 )
 
 var (
-	scripts           = make(map[string]string)
+	// scripts stores Lua source loaded once for RedisStore integration tests.
+	scripts = make(map[string]string)
+	// globalRedisClient is the Redis client shared by tests in this package.
 	globalRedisClient *goredis.Client
-	redisKeyCounter   atomic.Uint64
+	// redisKeyCounter makes generated Redis keys unique across subtests.
+	redisKeyCounter atomic.Uint64
 )
 
+// newTestRedisStore returns a RedisStore using the process-wide testcontainer Redis.
 func newTestRedisStore() *RedisStore {
 	fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
 	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript)
 }
 
+// redisTestKey returns a unique key per test case to avoid cross-test state leaks.
 func redisTestKey(t *testing.T, suffix string) string {
 	t.Helper()
 	return fmt.Sprintf("limigo:test:%s:%s:%d", t.Name(), suffix, redisKeyCounter.Add(1))
 }
 
+// init loads Lua sources once so tests exercise the same scripts embedded by RedisStore.
 func init() {
 	files := map[string]string{
 		"fw": "lua/fixed_window.lua",
@@ -44,9 +50,11 @@ func init() {
 	}
 }
 
+// TestMain provisions the shared Redis container used by store integration tests.
 func TestMain(m *testing.M) {
 	ctx := context.Background()
 
+	// A single Redis container keeps the suite fast while per-test keys preserve isolation.
 	redisContainer, err := tcredis.Run(ctx, "redis:7-alpine")
 	if err != nil {
 		panic("failed to start container: " + err.Error())
@@ -69,6 +77,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// TestAllowFixedWindow verifies fixed-window Redis behavior and failure handling.
 func TestAllowFixedWindow(t *testing.T) {
 	store := newTestRedisStore()
 	ctx := context.Background()
@@ -295,6 +304,7 @@ func TestAllowFixedWindow(t *testing.T) {
 	})
 }
 
+// TestAllowSlidingWindow reserves coverage for sliding-window Redis behavior.
 func TestAllowSlidingWindow(t *testing.T) {
 	// fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
 	// store := NewRedisStore(globalRedisClient, fwScript, swScript, tbScript)
@@ -317,6 +327,7 @@ func TestAllowSlidingWindow(t *testing.T) {
 	// })
 }
 
+// TestAllowTokenBucket verifies token-bucket Redis behavior and planned edge cases.
 func TestAllowTokenBucket(t *testing.T) {
 	store := newTestRedisStore()
 	ctx := context.Background()
@@ -358,6 +369,7 @@ func TestAllowTokenBucket(t *testing.T) {
 	})
 }
 
+// TestDisconnectedClient verifies Redis-backed limiters fail closed when Redis is unavailable.
 func TestDisconnectedClient(t *testing.T) {
 	badClient := goredis.NewClient(&goredis.Options{
 		Addr: "localhost:12334667", // Intentionally unreachable
