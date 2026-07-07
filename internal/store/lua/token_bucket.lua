@@ -8,22 +8,42 @@
 -- ARGV[1] - bucket capacity (maximum number of tokens)
 -- ARGV[2] - refill rate (tokens per second)
 
+local capacity = tonumber(ARGV[1])
+local refill_rate = tonumber(ARGV[2])
+
+if capacity <= 0 then
+    return redis.error_reply('capacity must be greater than zero')
+end
+
+if refill_rate <= 0 then
+    return redis.error_reply('refill_rate must be greater than zero')
+end
+
 local time = redis.call('TIME')
+local now_ms = time[1] * 1000 + math.floor(time[2] / 1000)
 
-local now_ms = time[1] * 1000 + math.floor(time[2]/1000)
-
-local token_count = tonumber(redis.call('HGET', KEYS[1], 'tokens')) or tonumber(ARGV[1])
+local token_count = tonumber(redis.call('HGET', KEYS[1], 'tokens')) or capacity
 local last_refill_ms = tonumber(redis.call('HGET', KEYS[1], 'last_refill_ms')) or now_ms
 
-local num_token_refill = tonumber(ARGV[2]) * (now_ms - last_refill_ms) / 1000
+local tokens_to_refill = refill_rate * (now_ms - last_refill_ms) / 1000
+token_count = math.min(token_count + tokens_to_refill, capacity)
 
-token_count = math.min(token_count+num_token_refill, tonumber(ARGV[1]))
+local full_refill_ms = (capacity / refill_rate) * 1000
+local ttl_ms = math.floor(full_refill_ms * 2)
+ttl_ms = math.max(ttl_ms, 60000)
+ttl_ms = math.min(ttl_ms, 86400000)
 
-redis.call("HSET", KEYS[1], 'last_refill_ms', now_ms)
+local allowed = 0
+
+redis.call('HSET', KEYS[1], 'last_refill_ms', now_ms)
 
 if token_count >= 1 then
-    redis.call("HSET", KEYS[1], 'tokens', token_count - 1)
-    return 1
+    redis.call('HSET', KEYS[1], 'tokens', token_count - 1)
+    allowed = 1
 else
-    return 0
+    redis.call('HSET', KEYS[1], 'tokens', token_count)
 end
+
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+
+return allowed
