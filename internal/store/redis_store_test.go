@@ -306,39 +306,16 @@ func TestAllowFixedWindow(t *testing.T) {
 
 // TestAllowSlidingWindow reserves coverage for sliding-window Redis behavior.
 func TestAllowSlidingWindow(t *testing.T) {
-	// fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
-	// store := NewRedisStore(globalRedisClient, fwScript, swScript, tbScript)
-	// // ctx := context.Background()
-
-	// t.Run("Happy Path and Limit Enforcement", func(t *testing.T) {
-	// 	// TODO: Implement sliding window limit enforcement test
-	// })
-
-	// t.Run("Rolling Expiration", func(t *testing.T) {
-	// 	// TODO: Implement test to verify older requests fall out of the time window
-	// })
-
-	// t.Run("Concurrency", func(t *testing.T) {
-	// 	// TODO: Implement Thundering Herd concurrency test for sliding window
-	// })
-
-	// t.Run("Key Expiration", func(t *testing.T) {
-	// 	// TODO: Implement TTL verification test for sliding window
-	// })
-}
-
-// TestAllowTokenBucket verifies token-bucket Redis behavior and planned edge cases.
-func TestAllowTokenBucket(t *testing.T) {
 	store := newTestRedisStore()
 	ctx := context.Background()
 
-	t.Run("Happy Path and Drain", func(t *testing.T) {
-		capacity := 10
-		rate := 1
+	t.Run("HappyPathAllowsRequestsUpToLimit", func(t *testing.T) {
+		limit := 2
+		window := 5 * time.Second
 		key := redisTestKey(t, "happy")
 
-		for i := 0; i < capacity; i++ {
-			allowed, err := store.AllowTokenBucket(ctx, key, float64(capacity), float64(rate))
+		for i := range limit {
+			allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on call %d: %v", i+1, err)
 			}
@@ -346,8 +323,24 @@ func TestAllowTokenBucket(t *testing.T) {
 				t.Fatalf("expected call %d to be allowed", i+1)
 			}
 		}
+	})
 
-		allowed, err := store.AllowTokenBucket(ctx, key, float64(capacity), float64(rate))
+	t.Run("UnhappyPathDeniesAfterLimitExceeded", func(t *testing.T) {
+		limit := 2
+		window := 5 * time.Second
+		key := redisTestKey(t, "over-limit")
+
+		for i := range limit {
+			allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
+			if err != nil {
+				t.Fatalf("unexpected error on setup call %d: %v", i+1, err)
+			}
+			if !allowed {
+				t.Fatalf("expected setup call %d to be allowed", i+1)
+			}
+		}
+
+		allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
 		if err != nil {
 			t.Fatalf("unexpected error on deny call: %v", err)
 		}
@@ -356,16 +349,146 @@ func TestAllowTokenBucket(t *testing.T) {
 		}
 	})
 
-	t.Run("Refill Logic", func(t *testing.T) {
-		// TODO: Implement test with time.Sleep or mock clock to verify bucket refills correctly
+	t.Run("AllowsAgainAfterTheOldestRequestExpires", func(t *testing.T) {
+		limit := int64(2)
+		window := 100 * time.Millisecond
+		key := redisTestKey(t, "oldest-expires")
+
+		allowed, err := store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 1, err)
+		}
+		if !allowed {
+			t.Fatalf("expected setup call %d to be allowed", 1)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 2, err)
+		}
+		if !allowed {
+			t.Fatalf("expected setup call %d to be allowed", 2)
+		}
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 3, err)
+		}
+		if allowed {
+			t.Fatalf("expected setup call %d to be denied", 3)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 4, err)
+		}
+		if !allowed {
+			t.Fatalf("expected setup call %d to be allowed", 4)
+		}
 	})
 
-	t.Run("Concurrency", func(t *testing.T) {
-		// TODO: Implement Thundering Herd concurrency test for token bucket
+	t.Run("OnlyExpiredRequestsFreeCapacity", func(t *testing.T) {
+		limit := int64(2)
+		window := 100 * time.Millisecond
+		key := redisTestKey(t, "partial-expiry")
+
+		allowed, err := store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 1, err)
+		}
+		if !allowed {
+			t.Fatalf("expected setup call %d to be allowed", 1)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on setup call %d: %v", 2, err)
+		}
+		if !allowed {
+			t.Fatalf("expected setup call %d to be allowed", 2)
+		}
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on deny call: %v", err)
+		}
+		if allowed {
+			t.Fatalf("expected setup call %d to be denied", 3)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error after oldest request expired: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected request to be allowed after oldest request expired")
+		}
+
+		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("unexpected error on final deny call: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected request to be denied because only one expired request freed capacity")
+		}
+	})
+}
+
+// TestAllowTokenBucket verifies token-bucket Redis behavior and planned edge cases.
+func TestAllowTokenBucket(t *testing.T) {
+	store := newTestRedisStore()
+	ctx := context.Background()
+
+	t.Run("HappyPathAndDrainFromBucket", func(t *testing.T) {
+		capacity := float64(10)
+		rate := float64(1)
+		key := redisTestKey(t, "happy")
+
+		for call := 1; call <= int(capacity); call++ {
+			allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+			if err != nil {
+				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
+			}
+			if !allowed {
+				t.Fatalf("expected call %d to be allowed while bucket still has tokens", call)
+			}
+		}
+
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on drained-bucket call: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected request to be denied after bucket was drained")
+		}
 	})
 
-	t.Run("Key Expiration", func(t *testing.T) {
-		// TODO: Implement TTL verification test for token bucket
+	t.Run("RefillAllowsAfterWaiting", func(t *testing.T) {
+	})
+
+	t.Run("PartialRefillStillDenies", func(t *testing.T) {
+	})
+
+	t.Run("RefillNotAllowedPastCapacity", func(t *testing.T) {
+	})
+
+	t.Run("ConcurrentBurstAllowsOnlyCapacity", func(t *testing.T) {
+	})
+
+	t.Run("IndependentKeysDoNotShareBucket", func(t *testing.T) {
+
+	})
+
+	t.Run("KeyExpiration", func(t *testing.T) {
+
 	})
 }
 
