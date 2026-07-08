@@ -576,15 +576,96 @@ func TestAllowTokenBucket(t *testing.T) {
 		}
 	})
 	t.Run("ConcurrentBurstAllowsOnlyCapacity", func(t *testing.T) {
+		capacity := float64(50)
+		rate := float64(1)
+		workers := 100
+		key := redisTestKey(t, "concurrent-burst")
 
+		var allowedCount atomic.Int64
+		var wg sync.WaitGroup
+
+		for range workers {
+			wg.Go(func() {
+				allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+				if err != nil {
+					t.Errorf("unexpected error during concurrent request: %v", err)
+					return
+				}
+				if allowed {
+					allowedCount.Add(1)
+				}
+			})
+		}
+
+		wg.Wait()
+
+		if allowedCount.Load() != int64(capacity) {
+			t.Fatalf("expected exactly %d requests to be allowed, got %d", int64(capacity), allowedCount.Load())
+		}
 	})
 
 	t.Run("IndependentKeysDoNotShareBucket", func(t *testing.T) {
+		capacity := float64(1)
+		rate := float64(1)
+		keyA := redisTestKey(t, "key-a")
+		keyB := redisTestKey(t, "key-b")
 
+		allowed, err := store.AllowTokenBucket(ctx, keyA, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error for first key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected first key to start with a full bucket")
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, keyA, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error for exhausted first key: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected second request for first key to be denied after its bucket was drained")
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error for second key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected second key to start with a full bucket")
+		}
+
+		allowed, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error for exhausted second key: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected second request for second key to be denied after its bucket was drained")
+		}
 	})
 
 	t.Run("KeyExpiration", func(t *testing.T) {
+		capacity := float64(1)
+		rate := float64(1)
+		key := redisTestKey(t, "expiration")
 
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error while creating token bucket key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected first request to create a full token bucket and be allowed")
+		}
+
+		ttl, err := globalRedisClient.PTTL(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("unexpected error while checking token bucket TTL: %v", err)
+		}
+		if ttl <= 0 {
+			t.Fatalf("expected token bucket key to have a positive TTL, got %s", ttl)
+		}
+		if ttl > time.Minute {
+			t.Fatalf("expected token bucket TTL to be capped at one minute for this rate, got %s", ttl)
+		}
 	})
 }
 
