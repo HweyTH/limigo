@@ -28,16 +28,34 @@ type Config struct {
 	Rules []Rule `yaml:"rules"`
 }
 
-// Rule defines a named rate limit and the request matcher that activates it.
+// WindowLimit defines the limit and duration used by window-based algorithms.
+type WindowLimit struct {
+	// Limit is the maximum number of requests allowed within Window.
+	Limit int64 `yaml:"limit"`
+	// Window is the configured rate limit duration, such as 60s.
+	Window time.Duration `yaml:"window"`
+}
+
+// TokenBucketConfig defines the capacity and refill rate used by token bucket rules.
+type TokenBucketConfig struct {
+	// Capacity is the maximum number of tokens the bucket can hold.
+	Capacity float64 `yaml:"capacity"`
+	// Rate is the number of tokens added to the bucket per second.
+	Rate float64 `yaml:"rate"`
+}
+
+// Rule defines a named rate limit, its matcher, and algorithm-specific settings.
 type Rule struct {
 	// Name identifies the rule in logs, metrics, and validation errors.
 	Name string `yaml:"name"`
 	// Match defines the request attributes that activate the rule.
 	Match Match `yaml:"match"`
-	// Limit is the maximum number of requests allowed within Window.
-	Limit int64 `yaml:"limit"`
-	// Window is the configured rate limit duration, such as 60s.
-	Window time.Duration `yaml:"window"`
 	// Algorithm selects the limiter implementation for the rule.
 	Algorithm Algorithm `yaml:"algorithm"`
+	// FixedWindow defines parameters for the fixed window counter algorithm.
+	FixedWindow *WindowLimit `yaml:"fixed_window,omitempty"`
+	// SlidingWindow defines parameters for the sliding window log algorithm.
+	SlidingWindow *WindowLimit `yaml:"sliding_window,omitempty"`
+	// TokenBucket defines parameters for the token bucket algorithm.
+	TokenBucket *TokenBucketConfig `yaml:"token_bucket,omitempty"`
 }
