@@ -1,3 +1,5 @@
+// Command limigo loads rate-limit rules, connects to Redis, and prepares the
+// Redis-backed limiter store used by the service runtime.
 package main
 
 import (
@@ -21,6 +23,7 @@ type options struct {
 	redisAddr  string
 }
 
+// luaScripts groups the Redis Lua source needed to construct a RedisStore.
 type luaScripts struct {
 	fixedWindow   string
 	slidingWindow string
@@ -36,6 +39,8 @@ func main() {
 	}
 }
 
+// run performs startup work with injectable process dependencies so tests can
+// exercise flag parsing, environment defaults, and output without spawning a process.
 func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.Writer) (runErr error) {
 	opts, err := parseOptions(args, getenv, stderr)
 	if err != nil {
@@ -81,6 +86,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	return nil
 }
 
+// parseOptions reads command-line flags and environment fallbacks into runtime options.
 func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (options, error) {
 	opts := options{}
 	flags := flag.NewFlagSet("limigo", flag.ContinueOnError)
@@ -106,6 +112,7 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	return opts, nil
 }
 
+// envOrDefault returns a non-blank environment value or the supplied fallback.
 func envOrDefault(getenv func(string) string, key string, fallback string) string {
 	if value := getenv(key); strings.TrimSpace(value) != "" {
 		return value
@@ -113,6 +120,7 @@ func envOrDefault(getenv func(string) string, key string, fallback string) strin
 	return fallback
 }
 
+// readTextFile reads a UTF-8 text file and wraps the path into any read error.
 func readTextFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -121,6 +129,7 @@ func readTextFile(path string) (string, error) {
 	return string(data), nil
 }
 
+// loadLuaScripts reads all Redis Lua scripts from dir in the order expected by RedisStore.
 func loadLuaScripts(dir string) (luaScripts, error) {
 	fixedWindow, err := readTextFile(filepath.Join(dir, "fixed_window.lua"))
 	if err != nil {

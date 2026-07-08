@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// TestLoadParsesWindowDuration verifies YAML duration parsing for every supported algorithm.
 func TestLoadParsesWindowDuration(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -57,6 +58,7 @@ func TestLoadParsesWindowDuration(t *testing.T) {
 	}
 }
 
+// TestValidateAcceptsValidConfig verifies each supported algorithm passes validation.
 func TestValidateAcceptsValidConfig(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -79,6 +81,7 @@ func TestValidateAcceptsValidConfig(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsBadConfig verifies validation fails with useful errors for invalid rules.
 func TestValidateRejectsBadConfig(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -224,6 +227,7 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidWindowDuration verifies malformed duration strings fail during parsing.
 func TestLoadRejectsInvalidWindowDuration(t *testing.T) {
 	yamlText := strings.Join([]string{
 		"rules:",
@@ -253,6 +257,7 @@ func TestLoadRejectsInvalidWindowDuration(t *testing.T) {
 	}
 }
 
+// validTestConfig returns the baseline config mutated by validation tests.
 func validTestConfig() *Config {
 	return &Config{
 		Rules: []Rule{

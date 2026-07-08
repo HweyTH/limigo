@@ -28,6 +28,7 @@ local last_refill_ms = tonumber(redis.call('HGET', KEYS[1], 'last_refill_ms')) o
 local tokens_to_refill = refill_rate * (now_ms - last_refill_ms) / 1000
 token_count = math.min(token_count + tokens_to_refill, capacity)
 
+-- Keep idle buckets long enough to refill fully while bounding Redis memory growth.
 local full_refill_ms = (capacity / refill_rate) * 1000
 local ttl_ms = math.floor(full_refill_ms * 2)
 ttl_ms = math.max(ttl_ms, 60000)
