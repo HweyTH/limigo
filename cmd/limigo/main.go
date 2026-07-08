@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hweyth/limigo/internal/config"
+	"github.com/hweyth/limigo/internal/rules"
 	"github.com/hweyth/limigo/internal/store"
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -78,7 +79,12 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("load Lua scripts: %w", err)
 	}
 	redisStore := store.NewRedisStore(redisClient, scripts.fixedWindow, scripts.slidingWindow, scripts.tokenBucket)
-	_ = redisStore
+
+	engine, err := rules.Compile(cfg, redisStore)
+	if err != nil {
+		return fmt.Errorf("compile rules: %w", err)
+	}
+	_ = engine
 
 	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr); err != nil {
 		return fmt.Errorf("write startup summary: %w", err)
