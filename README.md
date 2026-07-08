@@ -1,6 +1,6 @@
 # Limigo
 
-Distributed rate limiting service in Go with fixed window, sliding window, and token bucket algorithms, Redis-backed shared state, Prometheus metrics, and hot-reloadable rules.
+Limigo v0.1: Redis-backed distributed and hot-reloadable rate limiter in Go with configurable rules, fixed/sliding/token-bucket algorithms, Lua atomic operations, HTTP check endpoint, Docker Compose quickstart, tests, and basic Prometheus metrics.
 
 ## Rate limiting algorithms
 
