@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,13 +27,23 @@ func Load(path string) (*Config, error) {
 // It returns an error for the first rule that fails, including the rule name
 // in the message so the operator can identify and fix it quickly.
 func Validate(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config must not be nil")
+	}
+
 	for _, rule := range cfg.Rules {
-		if rule.Name == "" {
+		if strings.TrimSpace(rule.Name) == "" {
 			return fmt.Errorf("a rule is missing a name")
+		} else if strings.TrimSpace(rule.Match.HeaderName) == "" {
+			return fmt.Errorf("rule %q: match.header must not be empty", rule.Name)
+		} else if strings.TrimSpace(rule.Match.Value) == "" {
+			return fmt.Errorf("rule %q: match.value must not be empty", rule.Name)
 		} else if rule.Limit <= 0 {
 			return fmt.Errorf("rule %q: limit must be greater than zero", rule.Name)
-		} else if rule.Window == "" {
-			return fmt.Errorf("rule %q: window must not be empty", rule.Name)
+		} else if rule.Window <= 0 {
+			return fmt.Errorf("rule %q: window must be greater than zero", rule.Name)
+		} else if strings.TrimSpace(string(rule.Algorithm)) == "" {
+			return fmt.Errorf("rule %q: algorithm must not be empty", rule.Name)
 		} else if rule.Algorithm != TokenBucket && rule.Algorithm != SlidingWindow && rule.Algorithm != FixedWindow {
 			return fmt.Errorf("rule %q: unknown algorithm %q", rule.Name, rule.Algorithm)
 		}

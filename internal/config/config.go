@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Algorithm identifies the rate limiting algorithm selected by a rule.
 type Algorithm string
 
@@ -35,7 +37,7 @@ type Rule struct {
 	// Limit is the maximum number of requests allowed within Window.
 	Limit int64 `yaml:"limit"`
 	// Window is the configured rate limit duration, such as 60s.
-	Window string `yaml:"window"`
+	Window time.Duration `yaml:"window"`
 	// Algorithm selects the limiter implementation for the rule.
 	Algorithm Algorithm `yaml:"algorithm"`
 }
