@@ -3,22 +3,25 @@ rules:
     match:
       header: X-Plan
       value: free
-    limit: 100
-    window: 60s
     algorithm: fixed_window
+    fixed_window:
+      limit: 100
+      window: 60s
 
   - name: pro-tier-sliding-window
     match:
       header: X-Plan
       value: pro
-    limit: 10000
-    window: 60s
     algorithm: sliding_window
+    sliding_window:
+      limit: 10000
+      window: 60s
 
   - name: burst-tier-token-bucket
     match:
       header: X-Plan
       value: burst
-    limit: 1000
-    window: 60s
     algorithm: token_bucket
+    token_bucket:
+      capacity: 1000
+      rate: 200
