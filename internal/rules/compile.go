@@ -91,7 +91,8 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 			Name:  rule.Name,
 			Match: rule.Match,
 			allow: func(ctx context.Context, key string) (bool, error) {
-				return st.AllowFixedWindow(ctx, key, limit, window)
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				return st.AllowFixedWindow(ctx, storeKey, limit, window)
 			},
 		}, nil
 
@@ -104,7 +105,8 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 			Name:  rule.Name,
 			Match: rule.Match,
 			allow: func(ctx context.Context, key string) (bool, error) {
-				return st.AllowSlidingWindow(ctx, key, limit, window)
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				return st.AllowSlidingWindow(ctx, storeKey, limit, window)
 			},
 		}, nil
 
@@ -117,7 +119,8 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 			Name:  rule.Name,
 			Match: rule.Match,
 			allow: func(ctx context.Context, key string) (bool, error) {
-				return st.AllowTokenBucket(ctx, key, capacity, rate)
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				return st.AllowTokenBucket(ctx, storeKey, capacity, rate)
 			},
 		}, nil
 

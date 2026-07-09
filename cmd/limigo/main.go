@@ -8,11 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/hweyth/limigo/internal/api"
 	"github.com/hweyth/limigo/internal/config"
 	"github.com/hweyth/limigo/internal/rules"
 	"github.com/hweyth/limigo/internal/store"
@@ -22,6 +24,7 @@ import (
 type options struct {
 	configPath string
 	redisAddr  string
+	httpAddr   string
 }
 
 // luaScripts groups the Redis Lua source needed to construct a RedisStore.
@@ -84,10 +87,21 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	if err != nil {
 		return fmt.Errorf("compile rules: %w", err)
 	}
-	_ = engine
 
-	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr); err != nil {
+	mux := http.NewServeMux()
+	mux.Handle("/v1/check", api.NewCheckHandler(engine))
+
+	server := &http.Server{
+		Addr:    opts.httpAddr,
+		Handler: mux,
+	}
+
+	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr, opts.httpAddr); err != nil {
 		return fmt.Errorf("write startup summary: %w", err)
+	}
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve HTTP on %q: %w", opts.httpAddr, err)
 	}
 	return nil
 }
@@ -99,6 +113,12 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	flags.SetOutput(stderr)
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
 	flags.StringVar(&opts.redisAddr, "redis-addr", envOrDefault(getenv, "REDIS_ADDR", "localhost:6379"), "Redis server address")
+	flags.StringVar(
+		&opts.httpAddr,
+		"http-addr",
+		envOrDefault(getenv, "LIMIGO_HTTP_ADDR", ":8080"),
+		"HTTP listen address",
+	)
 
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -114,6 +134,9 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	}
 	if strings.TrimSpace(opts.redisAddr) == "" {
 		return opts, fmt.Errorf("Redis address must not be empty")
+	}
+	if strings.TrimSpace(opts.httpAddr) == "" {
+		return opts, fmt.Errorf("HTTP address must not be empty")
 	}
 	return opts, nil
 }

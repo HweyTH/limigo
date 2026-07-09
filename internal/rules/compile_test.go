@@ -257,8 +257,8 @@ func TestEngineCheck(t *testing.T) {
 		if store.lastCall != "token_bucket" {
 			t.Fatalf("expected token_bucket to be invoked, got %q", store.lastCall)
 		}
-		if store.lastKey != "client-1" {
-			t.Fatalf("store key = %q, want client-1", store.lastKey)
+		if store.lastKey != "limigo:pro-tier:client-1" {
+			t.Fatalf("store key = %q, want limigo:pro-tier:client-1", store.lastKey)
 		}
 	})
 
