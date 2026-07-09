@@ -44,6 +44,17 @@ type Engine struct {
 	compiledRules []*CompiledRule
 }
 
+// Decision describes the outcome of checking a request key against the first
+// configured rule matched by request headers.
+type Decision struct {
+	// Allowed reports whether the request is within the matched rule's limit.
+	Allowed bool
+	// Matched reports whether any configured rule matched the request headers.
+	Matched bool
+	// RuleName identifies the matched rule. It is empty when Matched is false.
+	RuleName string
+}
+
 // Compile turns cfg's rules into an Engine backed by st. cfg is expected to
 // have already passed config.Validate; Compile still checks that each rule's
 // algorithm-specific settings are present so a bad rule fails loudly at
@@ -138,4 +149,25 @@ func (e *Engine) Evaluate(ctx context.Context, headerName, headerValue, key stri
 	}
 	allowed, err = rule.Allow(ctx, key)
 	return allowed, true, err
+}
+
+// Check evaluates key against the first compiled rule whose configured header
+// matches the value returned by headerValue. If no rule matches, Check returns
+// a fail-closed decision with Matched false and no store call.
+func (e *Engine) Check(ctx context.Context, key string, headerValue func(string) string) (Decision, error) {
+	if headerValue == nil {
+		return Decision{}, fmt.Errorf("header value lookup must not be nil")
+	}
+
+	for _, rule := range e.compiledRules {
+		if headerValue(rule.Match.HeaderName) == rule.Match.Value {
+			allowed, err := rule.Allow(ctx, key)
+			return Decision{
+				Allowed:  allowed,
+				Matched:  true,
+				RuleName: rule.Name,
+			}, err
+		}
+	}
+	return Decision{Allowed: false, Matched: false}, nil
 }

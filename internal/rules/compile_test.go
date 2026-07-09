@@ -15,20 +15,24 @@ type fakeStore struct {
 	allow    bool
 	err      error
 	lastCall string
+	lastKey  string
 }
 
 func (s *fakeStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
 	s.lastCall = "fixed_window"
+	s.lastKey = key
 	return s.allow, s.err
 }
 
 func (s *fakeStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
 	s.lastCall = "sliding_window"
+	s.lastKey = key
 	return s.allow, s.err
 }
 
 func (s *fakeStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error) {
 	s.lastCall = "token_bucket"
+	s.lastKey = key
 	return s.allow, s.err
 }
 
@@ -192,6 +196,128 @@ func TestEngineEvaluate(t *testing.T) {
 		}
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("expected store error to propagate, got %v", err)
+		}
+	})
+}
+
+func TestEngineCheck(t *testing.T) {
+	newEngine := func(t *testing.T, store *fakeStore) *Engine {
+		t.Helper()
+		cfg := &config.Config{
+			Rules: []config.Rule{
+				{
+					Name:      "free-tier",
+					Match:     config.Match{HeaderName: "X-Plan", Value: "free"},
+					Algorithm: config.FixedWindow,
+					FixedWindow: &config.WindowLimit{
+						Limit:  100,
+						Window: time.Minute,
+					},
+				},
+				{
+					Name:      "pro-tier",
+					Match:     config.Match{HeaderName: "X-Plan", Value: "pro"},
+					Algorithm: config.TokenBucket,
+					TokenBucket: &config.TokenBucketConfig{
+						Capacity: 10000,
+						Rate:     100,
+					},
+				},
+			},
+		}
+		engine, err := Compile(cfg, store)
+		if err != nil {
+			t.Fatalf("unexpected compile error: %v", err)
+		}
+		return engine
+	}
+
+	t.Run("HappyPathMatchesConfiguredHeaderAndAllowsRequest", func(t *testing.T) {
+		store := &fakeStore{allow: true}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(name string) string {
+			if name != "X-Plan" {
+				t.Fatalf("header lookup name = %q, want X-Plan", name)
+			}
+			return "pro"
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !decision.Matched {
+			t.Fatal("expected a rule to match")
+		}
+		if !decision.Allowed {
+			t.Fatal("expected request to be allowed")
+		}
+		if decision.RuleName != "pro-tier" {
+			t.Fatalf("RuleName = %q, want pro-tier", decision.RuleName)
+		}
+		if store.lastCall != "token_bucket" {
+			t.Fatalf("expected token_bucket to be invoked, got %q", store.lastCall)
+		}
+		if store.lastKey != "client-1" {
+			t.Fatalf("store key = %q, want client-1", store.lastKey)
+		}
+	})
+
+	t.Run("UnhappyPathNoRuleMatches", func(t *testing.T) {
+		store := &fakeStore{allow: true}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(string) string {
+			return "enterprise"
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if decision.Matched {
+			t.Fatal("expected no rule to match")
+		}
+		if decision.Allowed {
+			t.Fatal("expected unmatched request to be denied")
+		}
+		if decision.RuleName != "" {
+			t.Fatalf("RuleName = %q, want empty", decision.RuleName)
+		}
+		if store.lastCall != "" {
+			t.Fatalf("expected store not to be called, got %q", store.lastCall)
+		}
+	})
+
+	t.Run("UnhappyPathPropagatesStoreError", func(t *testing.T) {
+		wantErr := errors.New("redis unavailable")
+		store := &fakeStore{err: wantErr}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(string) string {
+			return "free"
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("expected store error to propagate, got %v", err)
+		}
+		if !decision.Matched {
+			t.Fatal("expected the free-tier rule to match")
+		}
+		if decision.Allowed {
+			t.Fatal("expected errored request to be denied")
+		}
+		if decision.RuleName != "free-tier" {
+			t.Fatalf("RuleName = %q, want free-tier", decision.RuleName)
+		}
+	})
+
+	t.Run("UnhappyPathNilHeaderValueLookupReturnsError", func(t *testing.T) {
+		store := &fakeStore{allow: true}
+		engine := newEngine(t, store)
+
+		_, err := engine.Check(context.Background(), "client-1", nil)
+		if err == nil {
+			t.Fatal("expected error for nil header lookup")
+		}
+		if store.lastCall != "" {
+			t.Fatalf("expected store not to be called, got %q", store.lastCall)
 		}
 	})
 }
