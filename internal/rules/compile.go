@@ -2,18 +2,25 @@ package rules
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/hweyth/limigo/internal/config"
+	"github.com/hweyth/limigo/internal/limiter"
 	"github.com/hweyth/limigo/internal/store"
 )
 
 // Store is the union of backing-store capabilities a compiled rule set needs
-// to evaluate every supported algorithm. RedisStore satisfies Store.
+// to evaluate every supported algorithm, including the batched delta-sync
+// variants used by rules with node-local caching enabled. RedisStore
+// satisfies Store.
 type Store interface {
 	store.FixedWindowStore
 	store.SlidingWindowStore
 	store.TokenBucketStore
+	store.FixedWindowSyncStore
+	store.TokenBucketSyncStore
 }
 
 // CompiledRule pairs a rule's request matcher with a closure that evaluates
@@ -24,6 +31,9 @@ type CompiledRule struct {
 	// Match defines the request attributes that activate the rule.
 	Match config.Match
 	allow func(ctx context.Context, key string) (bool, error)
+	// flush reconciles this rule's node-local cache with the backing Store.
+	// It is nil unless the rule opted into local caching (config.Rule.LocalCache).
+	flush func(ctx context.Context) error
 }
 
 // Matches reports whether headerName and headerValue activate this rule.
@@ -87,6 +97,9 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 			return nil, fmt.Errorf("fixed_window settings must be configured")
 		}
 		limit, window := rule.FixedWindow.Limit, rule.FixedWindow.Window
+		if rule.LocalCache {
+			return compileBatchingFixedWindow(rule, st, limit, window), nil
+		}
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
@@ -115,6 +128,9 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 			return nil, fmt.Errorf("token_bucket settings must be configured")
 		}
 		capacity, rate := rule.TokenBucket.Capacity, rule.TokenBucket.Rate
+		if rule.LocalCache {
+			return compileBatchingTokenBucket(rule, st, capacity, rate), nil
+		}
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
@@ -127,6 +143,89 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 	default:
 		return nil, fmt.Errorf("unknown algorithm %q", rule.Algorithm)
 	}
+}
+
+// compileBatchingFixedWindow builds a CompiledRule that decides admits
+// against a node-local cache (see limiter.BatchingFixedWindowManager) instead
+// of calling st on every request, trading a small accuracy window for lower
+// request latency and reduced load on st. flush reconciles the local cache
+// with st and must be driven periodically by the caller (see Engine.FlushLocalCaches).
+func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window time.Duration) *CompiledRule {
+	manager := limiter.NewBatchingFixedWindowManager(limit)
+	return &CompiledRule{
+		Name:  rule.Name,
+		Match: rule.Match,
+		allow: func(ctx context.Context, key string) (bool, error) {
+			return manager.Allow(ctx, key)
+		},
+		flush: func(ctx context.Context) error {
+			var errs error
+			for key, bw := range manager.Snapshot() {
+				delta := bw.PendingDelta()
+				if delta == 0 {
+					continue
+				}
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				total, err := st.SyncFixedWindow(ctx, storeKey, delta, window)
+				if err != nil {
+					errs = errors.Join(errs, fmt.Errorf("sync fixed window %q: %w", storeKey, err))
+					continue
+				}
+				bw.ApplyRemoteTotal(delta, total)
+			}
+			return errs
+		},
+	}
+}
+
+// compileBatchingTokenBucket builds a CompiledRule that decides admits
+// against a node-local cache (see limiter.BatchingTokenBucketManager) instead
+// of calling st on every request, trading a small accuracy window for lower
+// request latency and reduced load on st. flush reconciles the local cache
+// with st and must be driven periodically by the caller (see Engine.FlushLocalCaches).
+func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float64) *CompiledRule {
+	manager := limiter.NewBatchingTokenBucketManager(capacity, rate)
+	return &CompiledRule{
+		Name:  rule.Name,
+		Match: rule.Match,
+		allow: func(ctx context.Context, key string) (bool, error) {
+			return manager.Allow(ctx, key)
+		},
+		flush: func(ctx context.Context) error {
+			var errs error
+			for key, tb := range manager.Snapshot() {
+				delta := tb.PendingDelta()
+				if delta == 0 {
+					continue
+				}
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				remaining, err := st.SyncTokenBucket(ctx, storeKey, delta, capacity, rate)
+				if err != nil {
+					errs = errors.Join(errs, fmt.Errorf("sync token bucket %q: %w", storeKey, err))
+					continue
+				}
+				tb.ApplyRemoteTotal(delta, remaining)
+			}
+			return errs
+		},
+	}
+}
+
+// FlushLocalCaches reconciles every rule using node-local caching (see
+// config.Rule.LocalCache) with the backing store. Rules without local caching
+// enabled are skipped. Errors from individual rules are joined so one rule's
+// backing-store failure does not prevent others from flushing.
+func (e *Engine) FlushLocalCaches(ctx context.Context) error {
+	var errs error
+	for _, rule := range e.compiledRules {
+		if rule.flush == nil {
+			continue
+		}
+		if err := rule.flush(ctx); err != nil {
+			errs = errors.Join(errs, fmt.Errorf("rule %q: %w", rule.Name, err))
+		}
+	}
+	return errs
 }
 
 // Match returns the first compiled rule whose matcher is activated by
