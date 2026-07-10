@@ -96,6 +96,49 @@ func TestLoadParsesAlgorithmSettings(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "fixed window with local_cache enabled",
+			yamlText: strings.Join([]string{
+				"rules:",
+				"  - name: free-tier",
+				"    match:",
+				"      header: X-Plan",
+				"      value: free",
+				"    algorithm: fixed_window",
+				"    local_cache: true",
+				"    fixed_window:",
+				"      limit: 100",
+				"      window: 60s",
+				"",
+			}, "\n"),
+			assertion: func(t *testing.T, rule Rule) {
+				t.Helper()
+				if !rule.LocalCache {
+					t.Fatal("LocalCache = false, want true")
+				}
+			},
+		},
+		{
+			name: "fixed window with local_cache omitted",
+			yamlText: strings.Join([]string{
+				"rules:",
+				"  - name: free-tier",
+				"    match:",
+				"      header: X-Plan",
+				"      value: free",
+				"    algorithm: fixed_window",
+				"    fixed_window:",
+				"      limit: 100",
+				"      window: 60s",
+				"",
+			}, "\n"),
+			assertion: func(t *testing.T, rule Rule) {
+				t.Helper()
+				if rule.LocalCache {
+					t.Fatal("LocalCache = true, want false (zero value)")
+				}
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -121,6 +164,22 @@ func TestValidateAcceptsValidConfig(t *testing.T) {
 		{name: "fixed window", cfg: validWindowConfig(FixedWindow)},
 		{name: "sliding window", cfg: validWindowConfig(SlidingWindow)},
 		{name: "token bucket", cfg: validTokenBucketConfig()},
+		{
+			name: "fixed window with local_cache",
+			cfg: func() *Config {
+				cfg := validWindowConfig(FixedWindow)
+				cfg.Rules[0].LocalCache = true
+				return cfg
+			}(),
+		},
+		{
+			name: "token bucket with local_cache",
+			cfg: func() *Config {
+				cfg := validTokenBucketConfig()
+				cfg.Rules[0].LocalCache = true
+				return cfg
+			}(),
+		},
 	}
 
 	for _, tc := range tests {
@@ -334,6 +393,15 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 				return cfg
 			},
 			wantErr: "sliding_window settings only apply when algorithm is \"sliding_window\"",
+		},
+		{
+			name: "sliding window rejects local_cache",
+			cfg: func() *Config {
+				cfg := validWindowConfig(SlidingWindow)
+				cfg.Rules[0].LocalCache = true
+				return cfg
+			},
+			wantErr: "local_cache is not supported for sliding_window",
 		},
 	}
 

@@ -58,4 +58,9 @@ type Rule struct {
 	SlidingWindow *WindowLimit `yaml:"sliding_window,omitempty"`
 	// TokenBucket defines parameters for the token bucket algorithm.
 	TokenBucket *TokenBucketConfig `yaml:"token_bucket,omitempty"`
+	// LocalCache opts this rule into node-local burst absorption: requests are
+	// admitted against an in-process cache and periodically reconciled with
+	// Redis, trading a small accuracy window for lower latency and Redis load.
+	// Only supported for Fixed Window and Token Bucket
+	LocalCache bool `yaml:"local_cache,omitempty"`
 }

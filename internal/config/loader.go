@@ -53,6 +53,10 @@ func validateRule(rule Rule) error {
 		return fmt.Errorf("rule %q: algorithm must not be empty", rule.Name)
 	}
 
+	if err := validateLocalCache(rule); err != nil {
+		return err
+	}
+
 	switch rule.Algorithm {
 	case FixedWindow:
 		return validateWindowLimit(rule, FixedWindow, rule.FixedWindow)
@@ -86,6 +90,17 @@ func validateTokenBucket(rule Rule) error {
 		return fmt.Errorf("rule %q: token_bucket.rate must be greater than zero", rule.Name)
 	}
 	return validateNoExtraSettings(rule, TokenBucket)
+}
+
+// validateLocalCache rejects local_cache on algorithms that cannot support
+// batched delta reconciliation with an authoritative accuracy guarantee.
+// Sliding window's exact rolling-timestamp accuracy is its main advantage
+// over fixed window, so it deliberately does not support batching.
+func validateLocalCache(rule Rule) error {
+	if rule.LocalCache && rule.Algorithm == SlidingWindow {
+		return fmt.Errorf("rule %q: local_cache is not supported for %s", rule.Name, SlidingWindow)
+	}
+	return nil
 }
 
 func validateNoExtraSettings(rule Rule, algorithm Algorithm) error {
