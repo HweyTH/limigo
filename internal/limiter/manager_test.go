@@ -252,3 +252,199 @@ func TestWindowManagerConcurrencyCorrectness(t *testing.T) {
 		}
 	})
 }
+
+// TestBatchingFixedWindowManagerIsolation verifies that separate keys maintain
+// independent batching fixed window state — exhausting one key's local limit
+// must not affect another.
+func TestBatchingFixedWindowManagerIsolation(t *testing.T) {
+	limit := int64(2)
+	bwm := NewBatchingFixedWindowManager(limit)
+	ctx := context.Background()
+
+	ip1 := "192.168.1.100"
+	ip2 := "10.0.0.5"
+
+	bwm.Allow(ctx, ip1)
+	bwm.Allow(ctx, ip1)
+
+	allowed, err := bwm.Allow(ctx, ip1)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Errorf("expected %s to be blocked after exceeding limit", ip1)
+	}
+
+	allowed, err = bwm.Allow(ctx, ip2)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Errorf("expected %s to be allowed, manager is leaking state between IPs", ip2)
+	}
+}
+
+// TestBatchingFixedWindowManagerConcurrency verifies that
+// BatchingFixedWindowManager is safe for concurrent use — covering both
+// concurrent writes across distinct keys and concurrent reads on a single
+// shared key.
+func TestBatchingFixedWindowManagerConcurrency(t *testing.T) {
+	limit := int64(5)
+	bwm := NewBatchingFixedWindowManager(limit)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	workers := 500
+
+	t.Run("Concurrent Map Writes", func(t *testing.T) {
+		for i := range workers {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				ip := fmt.Sprintf("192.168.1.%d", id)
+				_, _ = bwm.Allow(ctx, ip)
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	t.Run("Concurrent Read from Single IP", func(t *testing.T) {
+		sharedIP := "203.0.113.1"
+		for range workers {
+			wg.Go(func() {
+				_, _ = bwm.Allow(ctx, sharedIP)
+			})
+		}
+		wg.Wait()
+	})
+}
+
+// TestBatchingFixedWindowManagerSnapshotIsolation verifies Snapshot returns an
+// independent copy — later map mutations on either side must not affect the
+// other, since a flush cycle (task #7) will iterate a snapshot while Allow
+// continues to run concurrently and may create new per-key windows.
+func TestBatchingFixedWindowManagerSnapshotIsolation(t *testing.T) {
+	bwm := NewBatchingFixedWindowManager(10)
+	ctx := context.Background()
+
+	if _, err := bwm.Allow(ctx, "existing-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	snapshot := bwm.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("len(snapshot) = %d, want 1", len(snapshot))
+	}
+
+	if _, err := bwm.Allow(ctx, "new-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot mutated after manager gained a new key: len = %d, want 1", len(snapshot))
+	}
+
+	delete(snapshot, "existing-key")
+	if _, ok := bwm.Snapshot()["existing-key"]; !ok {
+		t.Fatal("mutating a returned snapshot must not affect the manager's internal state")
+	}
+}
+
+// TestBatchingTokenBucketManagerIsolation verifies that separate keys maintain
+// independent batching token bucket state — exhausting one key's local
+// capacity must not affect another.
+func TestBatchingTokenBucketManagerIsolation(t *testing.T) {
+	capacity := float64(2)
+	rate := float64(1)
+	btm := NewBatchingTokenBucketManager(capacity, rate)
+	ctx := context.Background()
+
+	ip1 := "192.168.1.100"
+	ip2 := "10.0.0.5"
+
+	btm.Allow(ctx, ip1)
+	btm.Allow(ctx, ip1)
+
+	allowed, err := btm.Allow(ctx, ip1)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Errorf("expected %s to be blocked after exceeding capacity", ip1)
+	}
+
+	allowed, err = btm.Allow(ctx, ip2)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Errorf("expected %s to be allowed, manager is leaking state between IPs", ip2)
+	}
+}
+
+// TestBatchingTokenBucketManagerConcurrency verifies that
+// BatchingTokenBucketManager is safe for concurrent use — covering both
+// concurrent writes across distinct keys and concurrent reads on a single
+// shared key.
+func TestBatchingTokenBucketManagerConcurrency(t *testing.T) {
+	capacity := float64(2)
+	rate := float64(1)
+	btm := NewBatchingTokenBucketManager(capacity, rate)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	workers := 500
+
+	t.Run("Concurrent Map Writes", func(t *testing.T) {
+		for i := range workers {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				ip := fmt.Sprintf("192.168.1.%d", id)
+				_, _ = btm.Allow(ctx, ip)
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	t.Run("Concurrent Read from Single IP", func(t *testing.T) {
+		sharedIP := "203.0.113.1"
+		for range workers {
+			wg.Go(func() {
+				_, _ = btm.Allow(ctx, sharedIP)
+			})
+		}
+		wg.Wait()
+	})
+}
+
+// TestBatchingTokenBucketManagerSnapshotIsolation verifies Snapshot returns an
+// independent copy — later map mutations on either side must not affect the
+// other, since a flush cycle (task #7) will iterate a snapshot while Allow
+// continues to run concurrently and may create new per-key buckets.
+func TestBatchingTokenBucketManagerSnapshotIsolation(t *testing.T) {
+	btm := NewBatchingTokenBucketManager(10, 1)
+	ctx := context.Background()
+
+	if _, err := btm.Allow(ctx, "existing-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	snapshot := btm.Snapshot()
+	if len(snapshot) != 1 {
+		t.Fatalf("len(snapshot) = %d, want 1", len(snapshot))
+	}
+
+	if _, err := btm.Allow(ctx, "new-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot mutated after manager gained a new key: len = %d, want 1", len(snapshot))
+	}
+
+	delete(snapshot, "existing-key")
+	if _, ok := btm.Snapshot()["existing-key"]; !ok {
+		t.Fatal("mutating a returned snapshot must not affect the manager's internal state")
+	}
+}
