@@ -10,8 +10,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hweyth/limigo/internal/api"
@@ -22,16 +23,11 @@ import (
 )
 
 type options struct {
-	configPath string
-	redisAddr  string
-	httpAddr   string
-}
-
-// luaScripts groups the Redis Lua source needed to construct a RedisStore.
-type luaScripts struct {
-	fixedWindow   string
-	slidingWindow string
-	tokenBucket   string
+	configPath         string
+	redisAddr          string
+	httpAddr           string
+	shutdownTimeout    time.Duration
+	cacheFlushInterval time.Duration
 }
 
 func main() {
@@ -77,19 +73,21 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("ping Redis at %q: %w", opts.redisAddr, err)
 	}
 
-	scripts, err := loadLuaScripts(filepath.Join("internal", "store", "lua"))
+	fixedWindowScript, slidingWindowScript, tokenBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, err := store.LoadEmbeddedScripts()
 	if err != nil {
 		return fmt.Errorf("load Lua scripts: %w", err)
 	}
-	redisStore := store.NewRedisStore(redisClient, scripts.fixedWindow, scripts.slidingWindow, scripts.tokenBucket)
+	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, fixedWindowSyncScript, tokenBucketSyncScript)
 
 	engine, err := rules.Compile(cfg, redisStore)
 	if err != nil {
 		return fmt.Errorf("compile rules: %w", err)
 	}
 
+	holder := rules.NewEngineHolder(engine)
+
 	mux := http.NewServeMux()
-	mux.Handle("/v1/check", api.NewCheckHandler(engine))
+	mux.Handle("/v1/check", api.NewCheckHandler(holder))
 
 	server := &http.Server{
 		Addr:    opts.httpAddr,
@@ -100,10 +98,88 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("write startup summary: %w", err)
 	}
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve HTTP on %q: %w", opts.httpAddr, err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		onChange := func() {
+			newCfg, err := config.Load(opts.configPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				return
+			}
+			if err := config.Validate(newCfg); err != nil {
+				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				return
+			}
+			newEngine, err := rules.Compile(newCfg, redisStore)
+			if err != nil {
+				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				return
+			}
+			// Flush the outgoing engine's local caches before swapping it out —
+			// holder still points at the old engine here, so this reconciles any
+			// pending local_cache admits with Redis before they become unreachable.
+			if err := holder.FlushLocalCaches(ctx); err != nil {
+				fmt.Fprintf(stderr, "limigo: flush local caches before reload failed: %v\n", err)
+			}
+			holder.Store(newEngine)
+			fmt.Fprintf(stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), opts.configPath)
+		}
+		if err := config.Watch(ctx, opts.configPath, onChange); err != nil {
+			fmt.Fprintf(stderr, "limigo: config watcher stopped: %v\n", err)
+		}
+	}()
+
+	cacheFlushTicker := time.NewTicker(opts.cacheFlushInterval)
+	go func() {
+		defer cacheFlushTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-cacheFlushTicker.C:
+				if err := holder.FlushLocalCaches(ctx); err != nil {
+					fmt.Fprintf(stderr, "limigo: local cache flush failed: %v\n", err)
+				}
+			}
+		}
+	}()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve HTTP on %q: %w", opts.httpAddr, err)
+		}
+		return nil
+	case <-ctx.Done():
+		if _, err := fmt.Fprintf(stdout, "received shutdown signal, draining in-flight requests (timeout %s)...\n", opts.shutdownTimeout); err != nil {
+			return fmt.Errorf("write shutdown notice: %w", err)
+		}
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("graceful shutdown timed out after %s: %w", opts.shutdownTimeout, err)
+			}
+			return fmt.Errorf("shutdown HTTP server: %w", err)
+		}
+
+		if err := holder.FlushLocalCaches(shutdownCtx); err != nil {
+			return fmt.Errorf("flush local caches during shutdown: %w", err)
+		}
+
+		if _, err := fmt.Fprintf(stdout, "shutdown complete\n"); err != nil {
+			return fmt.Errorf("write shutdown complete notice: %w", err)
+		}
+		return nil
 	}
-	return nil
 }
 
 // parseOptions reads command-line flags and environment fallbacks into runtime options.
@@ -111,6 +187,8 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	opts := options{}
 	flags := flag.NewFlagSet("limigo", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.DurationVar(&opts.shutdownTimeout, "shutdown-timeout", envDurationOrDefault(getenv, "LIMIGO_SHUTDOWN_TIMEOUT", 10*time.Second), "max time to wait for in-flight requests to finish on shutdown")
+	flags.DurationVar(&opts.cacheFlushInterval, "cache-flush-interval", envDurationOrDefault(getenv, "LIMIGO_CACHE_FLUSH_INTERVAL", 10*time.Millisecond), "how often to reconcile local_cache rules with the backing store")
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
 	flags.StringVar(&opts.redisAddr, "redis-addr", envOrDefault(getenv, "REDIS_ADDR", "localhost:6379"), "Redis server address")
 	flags.StringVar(
@@ -138,6 +216,9 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	if strings.TrimSpace(opts.httpAddr) == "" {
 		return opts, fmt.Errorf("HTTP address must not be empty")
 	}
+	if opts.cacheFlushInterval <= 0 {
+		return opts, fmt.Errorf("cache flush interval must be greater than zero")
+	}
 	return opts, nil
 }
 
@@ -149,35 +230,14 @@ func envOrDefault(getenv func(string) string, key string, fallback string) strin
 	return fallback
 }
 
-// readTextFile reads a UTF-8 text file and wraps the path into any read error.
-func readTextFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read file %q: %w", path, err)
+func envDurationOrDefault(getenv func(string) string, key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(getenv(key))
+	if value == "" {
+		return fallback
 	}
-	return string(data), nil
-}
-
-// loadLuaScripts reads all Redis Lua scripts from dir in the order expected by RedisStore.
-func loadLuaScripts(dir string) (luaScripts, error) {
-	fixedWindow, err := readTextFile(filepath.Join(dir, "fixed_window.lua"))
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
-		return luaScripts{}, err
+		return fallback
 	}
-
-	slidingWindow, err := readTextFile(filepath.Join(dir, "sliding_window.lua"))
-	if err != nil {
-		return luaScripts{}, err
-	}
-
-	tokenBucket, err := readTextFile(filepath.Join(dir, "token_bucket.lua"))
-	if err != nil {
-		return luaScripts{}, err
-	}
-
-	return luaScripts{
-		fixedWindow:   fixedWindow,
-		slidingWindow: slidingWindow,
-		tokenBucket:   tokenBucket,
-	}, nil
+	return parsed
 }
