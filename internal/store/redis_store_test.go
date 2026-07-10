@@ -25,7 +25,8 @@ var (
 // newTestRedisStore returns a RedisStore using the process-wide testcontainer Redis.
 func newTestRedisStore() *RedisStore {
 	fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
-	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript)
+	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
+	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, fwSyncScript, tbSyncScript)
 }
 
 // redisTestKey returns a unique key per test case to avoid cross-test state leaks.
@@ -37,9 +38,11 @@ func redisTestKey(t *testing.T, suffix string) string {
 // init loads Lua sources once so tests exercise the same scripts embedded by RedisStore.
 func init() {
 	files := map[string]string{
-		"fw": "lua/fixed_window.lua",
-		"sw": "lua/sliding_window.lua",
-		"tb": "lua/token_bucket.lua",
+		"fw":      "lua/fixed_window.lua",
+		"sw":      "lua/sliding_window.lua",
+		"tb":      "lua/token_bucket.lua",
+		"fw_sync": "lua/fixed_window_sync.lua",
+		"tb_sync": "lua/token_bucket_sync.lua",
 	}
 	for name, path := range files {
 		content, err := os.ReadFile(path)
@@ -669,6 +672,274 @@ func TestAllowTokenBucket(t *testing.T) {
 	})
 }
 
+// TestSyncFixedWindow verifies the batched delta-sync script used by node-local caching.
+func TestSyncFixedWindow(t *testing.T) {
+	store := newTestRedisStore()
+	ctx := context.Background()
+
+	t.Run("HappyPathAppliesDeltaAndSetsExpiry", func(t *testing.T) {
+		window := 5 * time.Second
+		key := redisTestKey(t, "happy")
+
+		total, err := store.SyncFixedWindow(ctx, key, 5, window)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if total != 5 {
+			t.Fatalf("total = %d, want 5", total)
+		}
+
+		ttl, err := globalRedisClient.PTTL(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("unexpected error checking TTL: %v", err)
+		}
+		if ttl <= 0 {
+			t.Fatalf("expected key to have a positive TTL after first sync, got %s", ttl)
+		}
+	})
+
+	t.Run("AccumulatesAcrossMultipleSyncs", func(t *testing.T) {
+		window := 5 * time.Second
+		key := redisTestKey(t, "accumulate")
+
+		total, err := store.SyncFixedWindow(ctx, key, 3, window)
+		if err != nil {
+			t.Fatalf("unexpected error on first sync: %v", err)
+		}
+		if total != 3 {
+			t.Fatalf("total after first sync = %d, want 3", total)
+		}
+
+		total, err = store.SyncFixedWindow(ctx, key, 4, window)
+		if err != nil {
+			t.Fatalf("unexpected error on second sync: %v", err)
+		}
+		if total != 7 {
+			t.Fatalf("total after second sync = %d, want 7", total)
+		}
+	})
+
+	t.Run("ZeroDeltaOnNonexistentKeyReturnsZeroWithoutCreatingKey", func(t *testing.T) {
+		window := 5 * time.Second
+		key := redisTestKey(t, "zero-delta")
+
+		total, err := store.SyncFixedWindow(ctx, key, 0, window)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if total != 0 {
+			t.Fatalf("total = %d, want 0", total)
+		}
+
+		exists, err := globalRedisClient.Exists(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("unexpected error checking existence: %v", err)
+		}
+		if exists != 0 {
+			t.Fatal("expected a zero-delta sync not to create a key")
+		}
+	})
+
+	t.Run("ZeroDeltaReturnsCurrentCountUnchanged", func(t *testing.T) {
+		window := 5 * time.Second
+		key := redisTestKey(t, "zero-delta-existing")
+
+		if _, err := store.SyncFixedWindow(ctx, key, 6, window); err != nil {
+			t.Fatalf("unexpected error seeding count: %v", err)
+		}
+
+		total, err := store.SyncFixedWindow(ctx, key, 0, window)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if total != 6 {
+			t.Fatalf("total = %d, want unchanged 6", total)
+		}
+	})
+
+	t.Run("WindowExpirationResetsCount", func(t *testing.T) {
+		window := 75 * time.Millisecond
+		key := redisTestKey(t, "expiration")
+
+		if _, err := store.SyncFixedWindow(ctx, key, 5, window); err != nil {
+			t.Fatalf("unexpected error on first sync: %v", err)
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			ttl, err := globalRedisClient.PTTL(ctx, key).Result()
+			if err != nil {
+				t.Fatalf("unexpected error checking TTL: %v", err)
+			}
+			if ttl == -2*time.Nanosecond {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		total, err := store.SyncFixedWindow(ctx, key, 2, window)
+		if err != nil {
+			t.Fatalf("unexpected error after window reset: %v", err)
+		}
+		if total != 2 {
+			t.Fatalf("total after window reset = %d, want 2 (fresh window)", total)
+		}
+	})
+
+	t.Run("InteroperatesWithDirectAllowFixedWindow", func(t *testing.T) {
+		window := 5 * time.Second
+		key := redisTestKey(t, "interop")
+
+		allowed, err := store.AllowFixedWindow(ctx, key, 10, window)
+		if err != nil {
+			t.Fatalf("unexpected error on direct allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected direct allow to succeed")
+		}
+
+		total, err := store.SyncFixedWindow(ctx, key, 4, window)
+		if err != nil {
+			t.Fatalf("unexpected error on sync: %v", err)
+		}
+		if total != 5 {
+			t.Fatalf("total = %d, want 5 (1 direct + 4 synced)", total)
+		}
+	})
+
+	t.Run("UnhappyPathReturnsErrorWhenContextIsCanceled", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := store.SyncFixedWindow(canceledCtx, redisTestKey(t, "canceled"), 1, time.Second)
+		if err == nil {
+			t.Fatal("expected context cancellation error, got nil")
+		}
+	})
+}
+
+// TestSyncTokenBucket verifies the batched delta-sync script used by node-local caching.
+func TestSyncTokenBucket(t *testing.T) {
+	store := newTestRedisStore()
+	ctx := context.Background()
+	const epsilon = 1e-6
+
+	t.Run("HappyPathAppliesDeltaFromFullBucket", func(t *testing.T) {
+		capacity := float64(10)
+		rate := float64(0.0001) // negligible refill within this assertion
+		key := redisTestKey(t, "happy")
+
+		remaining, err := store.SyncTokenBucket(ctx, key, 3, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if diff := remaining - 7; diff > epsilon || diff < -epsilon {
+			t.Fatalf("remaining = %v, want ~7", remaining)
+		}
+	})
+
+	t.Run("AccumulatesAcrossMultipleSyncs", func(t *testing.T) {
+		capacity := float64(10)
+		rate := float64(0.0001)
+		key := redisTestKey(t, "accumulate")
+
+		if _, err := store.SyncTokenBucket(ctx, key, 3, capacity, rate); err != nil {
+			t.Fatalf("unexpected error on first sync: %v", err)
+		}
+
+		remaining, err := store.SyncTokenBucket(ctx, key, 2, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on second sync: %v", err)
+		}
+		if diff := remaining - 5; diff > epsilon || diff < -epsilon {
+			t.Fatalf("remaining after second sync = %v, want ~5", remaining)
+		}
+	})
+
+	t.Run("DeltaExceedingAvailableTokensGoesNegative", func(t *testing.T) {
+		capacity := float64(5)
+		rate := float64(0.0001)
+		key := redisTestKey(t, "overshoot")
+
+		remaining, err := store.SyncTokenBucket(ctx, key, 8, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if diff := remaining - (-3); diff > epsilon || diff < -epsilon {
+			t.Fatalf("remaining = %v, want ~-3 (overshoot signal)", remaining)
+		}
+	})
+
+	t.Run("RefillAccumulatesOverElapsedTime", func(t *testing.T) {
+		capacity := float64(10)
+		rate := float64(20) // fast refill so a short, deterministic sleep is sufficient
+		key := redisTestKey(t, "refill")
+
+		if _, err := store.SyncTokenBucket(ctx, key, 10, capacity, rate); err != nil {
+			t.Fatalf("unexpected error draining bucket: %v", err)
+		}
+
+		time.Sleep(150 * time.Millisecond)
+
+		remaining, err := store.SyncTokenBucket(ctx, key, 0, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error after refill wait: %v", err)
+		}
+		if remaining <= 0 {
+			t.Fatalf("remaining = %v, want > 0 after tokens refill", remaining)
+		}
+		if remaining > capacity {
+			t.Fatalf("remaining = %v, want capped at capacity %v", remaining, capacity)
+		}
+	})
+
+	t.Run("InteroperatesWithDirectAllowTokenBucket", func(t *testing.T) {
+		capacity := float64(10)
+		rate := float64(0.0001)
+		key := redisTestKey(t, "interop")
+
+		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on direct allow: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected direct allow to succeed")
+		}
+
+		remaining, err := store.SyncTokenBucket(ctx, key, 4, capacity, rate)
+		if err != nil {
+			t.Fatalf("unexpected error on sync: %v", err)
+		}
+		if diff := remaining - 5; diff > epsilon || diff < -epsilon {
+			t.Fatalf("remaining = %v, want ~5 (1 direct + 4 synced from capacity 10)", remaining)
+		}
+	})
+
+	t.Run("ZeroCapacityReturnsError", func(t *testing.T) {
+		_, err := store.SyncTokenBucket(ctx, redisTestKey(t, "zero-capacity"), 1, 0, 1)
+		if err == nil {
+			t.Fatal("expected error for zero capacity, got nil")
+		}
+	})
+
+	t.Run("ZeroRateReturnsError", func(t *testing.T) {
+		_, err := store.SyncTokenBucket(ctx, redisTestKey(t, "zero-rate"), 1, 10, 0)
+		if err == nil {
+			t.Fatal("expected error for zero rate, got nil")
+		}
+	})
+
+	t.Run("UnhappyPathReturnsErrorWhenContextIsCanceled", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := store.SyncTokenBucket(canceledCtx, redisTestKey(t, "canceled"), 1, 10, 1)
+		if err == nil {
+			t.Fatal("expected context cancellation error, got nil")
+		}
+	})
+}
+
 // TestDisconnectedClient verifies Redis-backed limiters fail closed when Redis is unavailable.
 func TestDisconnectedClient(t *testing.T) {
 	badClient := goredis.NewClient(&goredis.Options{
@@ -676,7 +947,8 @@ func TestDisconnectedClient(t *testing.T) {
 	})
 
 	fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
-	store := NewRedisStore(badClient, fwScript, swScript, tbScript)
+	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
+	store := NewRedisStore(badClient, fwScript, swScript, tbScript, fwSyncScript, tbSyncScript)
 	ctx := context.Background()
 
 	t.Run("Fixed Window Fail Closed", func(t *testing.T) {
