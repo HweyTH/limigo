@@ -9,28 +9,30 @@ import (
 )
 
 // RedisStore is a Redis-backed implementation of FixedWindowStore, SlidingWindowStore,
-// and TokenBucketStore. Each algorithm's logic runs inside a Lua script executed
-// atomically on the Redis server to prevent race conditions across nodes.
+// TokenBucketStore, and LeakyBucketStore. Each algorithm's logic runs inside a Lua
+// script executed atomically on the Redis server to prevent race conditions across nodes.
 type RedisStore struct {
 	client                *redis.Client
 	fixedWindowScript     *redis.Script
 	slidingWindowScript   *redis.Script
 	tokenBucketScript     *redis.Script
+	leakyBucketScript     *redis.Script
 	fixedWindowSyncScript *redis.Script
 	tokenBucketSyncScript *redis.Script
 }
 
 // NewRedisStore returns a RedisStore backed by the given Redis client.
-// fwScript, swScript, and tbScript are the Lua source strings for the fixed window,
-// sliding window, and token bucket algorithms respectively. fwSyncScript and
-// tbSyncScript are the Lua source strings for the batched delta-sync variants
-// of the fixed window and token bucket algorithms, used by node-local caching.
-func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, tbScript string, fwSyncScript string, tbSyncScript string) *RedisStore {
+// fwScript, swScript, tbScript, and lbScript are the Lua source strings for the fixed
+// window, sliding window, token bucket, and leaky bucket algorithms respectively.
+// fwSyncScript and tbSyncScript are the Lua source strings for the batched delta-sync
+// variants of the fixed window and token bucket algorithms, used by node-local caching.
+func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, tbScript string, lbScript string, fwSyncScript string, tbSyncScript string) *RedisStore {
 	newRedisStore := RedisStore{
 		client:                redisClient,
 		fixedWindowScript:     redis.NewScript(fwScript),
 		slidingWindowScript:   redis.NewScript(swScript),
 		tokenBucketScript:     redis.NewScript(tbScript),
+		leakyBucketScript:     redis.NewScript(lbScript),
 		fixedWindowSyncScript: redis.NewScript(fwSyncScript),
 		tokenBucketSyncScript: redis.NewScript(tbSyncScript),
 	}
@@ -74,6 +76,28 @@ func (store *RedisStore) AllowTokenBucket(ctx context.Context, key string, capac
 		return false, fmt.Errorf("failed to execute token bucket algorithm: %w", err)
 	}
 	return res == 1, nil
+}
+
+// AllowLeakyBucket admits one request against key's GCRA schedule, returning true
+// if the request arrived on schedule, false if it arrived too early and should be
+// throttled. limit and window define the emission interval (window / limit); burst
+// defines the tolerance for clumped arrivals (emission_interval * (burst - 1)).
+// burst values less than 1 are treated as 1 (no clumping tolerance). When denied,
+// retryAfter is the exact duration until key's schedule will next admit a request.
+func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (allowed bool, retryAfter time.Duration, err error) {
+	if burst < 1 {
+		burst = 1
+	}
+	emissionIntervalMs := float64(window.Milliseconds()) / float64(limit)
+	toleranceMs := emissionIntervalMs * float64(burst-1)
+
+	cmd := store.leakyBucketScript.Run(ctx, store.client, []string{key}, emissionIntervalMs, toleranceMs)
+
+	res, err := cmd.Int64Slice()
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to execute leaky bucket algorithm: %w", err)
+	}
+	return res[0] == 1, time.Duration(res[1]) * time.Millisecond, nil
 }
 
 // SyncFixedWindow folds delta (requests already admitted locally since the last

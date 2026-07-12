@@ -24,9 +24,9 @@ var (
 
 // newTestRedisStore returns a RedisStore using the process-wide testcontainer Redis.
 func newTestRedisStore() *RedisStore {
-	fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
+	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, fwSyncScript, tbSyncScript)
+	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript)
 }
 
 // redisTestKey returns a unique key per test case to avoid cross-test state leaks.
@@ -41,6 +41,7 @@ func init() {
 		"fw":      "lua/fixed_window.lua",
 		"sw":      "lua/sliding_window.lua",
 		"tb":      "lua/token_bucket.lua",
+		"lb":      "lua/leaky_bucket.lua",
 		"fw_sync": "lua/fixed_window_sync.lua",
 		"tb_sync": "lua/token_bucket_sync.lua",
 	}
@@ -672,6 +673,184 @@ func TestAllowTokenBucket(t *testing.T) {
 	})
 }
 
+// TestAllowLeakyBucket verifies leaky bucket (GCRA) Redis behavior: burst
+// tolerance, schedule catch-up, key expiration, and isolation.
+func TestAllowLeakyBucket(t *testing.T) {
+	store := newTestRedisStore()
+	ctx := context.Background()
+
+	t.Run("HappyPathAllowsUpToBurstTolerance", func(t *testing.T) {
+		limit := int64(10)
+		window := 500 * time.Millisecond // emission interval = 50ms.
+		burst := int64(3)
+		key := redisTestKey(t, "happy")
+
+		for call := 1; call <= int(burst); call++ {
+			allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+			if err != nil {
+				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
+			}
+			if !allowed {
+				t.Fatalf("expected call %d to be allowed within burst tolerance", call)
+			}
+		}
+
+		allowed, retryAfter, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error on over-burst call: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected request to be denied after burst tolerance was exceeded")
+		}
+		if retryAfter <= 0 {
+			t.Fatalf("expected a positive retry-after when denied, got %s", retryAfter)
+		}
+	})
+
+	t.Run("ScheduleCatchesUpAfterWaiting", func(t *testing.T) {
+		limit := int64(20)
+		window := 200 * time.Millisecond // emission interval = 10ms.
+		burst := int64(1)
+		key := redisTestKey(t, "catch-up")
+
+		allowed, retryAfter, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error on first call: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected first request to be allowed")
+		}
+		if retryAfter != 0 {
+			t.Fatalf("expected retryAfter = 0 when allowed, got %s", retryAfter)
+		}
+
+		allowed, retryAfter, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error on second call: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected immediate second request to be denied with no burst tolerance")
+		}
+		if retryAfter <= 0 || retryAfter > window/10 {
+			t.Fatalf("expected retryAfter roughly equal to the 10ms emission interval, got %s", retryAfter)
+		}
+
+		time.Sleep(15 * time.Millisecond)
+
+		allowed, _, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error after waiting for the schedule: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected request to be allowed once the emission interval elapsed")
+		}
+	})
+
+	t.Run("ConcurrentBurstAllowsOnlyBurstTolerance", func(t *testing.T) {
+		limit := int64(50)
+		window := 5 * time.Second
+		burst := int64(10)
+		workers := 100
+		key := redisTestKey(t, "concurrent-burst")
+
+		var allowedCount atomic.Int64
+		var wg sync.WaitGroup
+
+		for range workers {
+			wg.Go(func() {
+				allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+				if err != nil {
+					t.Errorf("unexpected error during concurrent request: %v", err)
+					return
+				}
+				if allowed {
+					allowedCount.Add(1)
+				}
+			})
+		}
+
+		wg.Wait()
+
+		if allowedCount.Load() != burst {
+			t.Fatalf("expected exactly %d requests to be allowed, got %d", burst, allowedCount.Load())
+		}
+	})
+
+	t.Run("IndependentKeysDoNotShareSchedule", func(t *testing.T) {
+		limit := int64(10)
+		window := 5 * time.Second
+		burst := int64(1)
+		keyA := redisTestKey(t, "key-a")
+		keyB := redisTestKey(t, "key-b")
+
+		allowed, _, err := store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error for first key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected first key's first request to be allowed")
+		}
+
+		allowed, _, err = store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error for exhausted first key: %v", err)
+		}
+		if allowed {
+			t.Fatal("expected second request for first key to be denied")
+		}
+
+		allowed, _, err = store.AllowLeakyBucket(ctx, keyB, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error for second key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected second key's first request to be allowed, manager is leaking state between keys")
+		}
+	})
+
+	t.Run("KeyExpiration", func(t *testing.T) {
+		limit := int64(10)
+		window := 1 * time.Second
+		burst := int64(1)
+		key := redisTestKey(t, "expiration")
+
+		allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		if err != nil {
+			t.Fatalf("unexpected error while creating leaky bucket key: %v", err)
+		}
+		if !allowed {
+			t.Fatal("expected first request to be allowed")
+		}
+
+		ttl, err := globalRedisClient.PTTL(ctx, key).Result()
+		if err != nil {
+			t.Fatalf("unexpected error while checking leaky bucket TTL: %v", err)
+		}
+		if ttl <= 0 {
+			t.Fatalf("expected leaky bucket key to have a positive TTL, got %s", ttl)
+		}
+		if ttl > window {
+			t.Fatalf("expected leaky bucket TTL to be bounded by the emission interval, got %s", ttl)
+		}
+	})
+
+	t.Run("UnhappyPathReturnsErrorAndFailsClosedWhenContextIsCanceled", func(t *testing.T) {
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		allowed, retryAfter, err := store.AllowLeakyBucket(canceledCtx, redisTestKey(t, "canceled"), 10, time.Second, 1)
+		if err == nil {
+			t.Fatal("expected context cancellation error, got nil")
+		}
+		if retryAfter != 0 {
+			t.Fatalf("expected retryAfter = 0 on error, got %s", retryAfter)
+		}
+		if allowed {
+			t.Fatal("expected canceled request to fail closed")
+		}
+	})
+}
+
 // TestSyncFixedWindow verifies the batched delta-sync script used by node-local caching.
 func TestSyncFixedWindow(t *testing.T) {
 	store := newTestRedisStore()
@@ -946,9 +1125,9 @@ func TestDisconnectedClient(t *testing.T) {
 		Addr: "localhost:12334667", // Intentionally unreachable
 	})
 
-	fwScript, swScript, tbScript := scripts["fw"], scripts["sw"], scripts["tb"]
+	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	store := NewRedisStore(badClient, fwScript, swScript, tbScript, fwSyncScript, tbSyncScript)
+	store := NewRedisStore(badClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript)
 	ctx := context.Background()
 
 	t.Run("Fixed Window Fail Closed", func(t *testing.T) {
@@ -978,6 +1157,19 @@ func TestDisconnectedClient(t *testing.T) {
 		}
 		if success {
 			t.Errorf("Expected success to be false due to bad Redis client")
+		}
+	})
+
+	t.Run("Leaky Bucket Fail Closed", func(t *testing.T) {
+		success, retryAfter, err := store.AllowLeakyBucket(ctx, "test-key-lb", int64(10), time.Second, 1)
+		if err == nil {
+			t.Errorf("Expected an error due to disconnected Redis, but got nil")
+		}
+		if success {
+			t.Errorf("Expected success to be false due to bad Redis client")
+		}
+		if retryAfter != 0 {
+			t.Errorf("Expected retryAfter = 0 on error, got %s", retryAfter)
 		}
 	})
 }
