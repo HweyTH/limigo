@@ -13,10 +13,11 @@ func TestRingBuffer(t *testing.T) {
 	var oldestTest time.Time
 
 	for i := range 3 {
+		ts := time.Now()
 		if i == 1 {
-			oldestTest = time.Now()
+			oldestTest = ts
 		}
-		rb.Push(time.Now())
+		rb.Push(ts)
 	}
 
 	if count := rb.Count(); count != 3 {
