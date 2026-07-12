@@ -25,3 +25,13 @@ rules:
     token_bucket:
       capacity: 1000
       rate: 200
+
+  - name: steady-tier-leaky-bucket
+    match:
+      header: X-Plan
+      value: steady
+    algorithm: leaky_bucket
+    leaky_bucket:
+      limit: 600
+      window: 60s
+      burst: 10

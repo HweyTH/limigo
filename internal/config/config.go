@@ -12,6 +12,8 @@ const (
 	SlidingWindow Algorithm = "sliding_window"
 	// FixedWindow selects the fixed window counter algorithm.
 	FixedWindow Algorithm = "fixed_window"
+	// LeakyBucket selects the leaky bucket (GCRA) algorithm.
+	LeakyBucket Algorithm = "leaky_bucket"
 )
 
 // Match describes how an incoming request is matched to a rule.
@@ -44,6 +46,21 @@ type TokenBucketConfig struct {
 	Rate float64 `yaml:"rate"`
 }
 
+// LeakyBucketConfig defines the limit, window, and burst tolerance used by leaky
+// bucket (GCRA) rules. Limit and Window define the emission interval — the ideal
+// spacing between admitted requests — as Window / Limit. Burst is the number of
+// requests permitted to clump together before the schedule catches up; a Burst of
+// 1 (or 0) admits requests strictly on schedule with no clumping tolerance.
+type LeakyBucketConfig struct {
+	// Limit is the number of requests the schedule admits per Window at steady state.
+	Limit int64 `yaml:"limit"`
+	// Window is the period over which Limit requests are admitted at steady state.
+	Window time.Duration `yaml:"window"`
+	// Burst is the number of requests allowed to arrive back-to-back before
+	// subsequent requests must wait for the schedule to catch up. Defaults to 1.
+	Burst int64 `yaml:"burst,omitempty"`
+}
+
 // Rule defines a named rate limit, its matcher, and algorithm-specific settings.
 type Rule struct {
 	// Name identifies the rule in logs, metrics, and validation errors.
@@ -58,6 +75,8 @@ type Rule struct {
 	SlidingWindow *WindowLimit `yaml:"sliding_window,omitempty"`
 	// TokenBucket defines parameters for the token bucket algorithm.
 	TokenBucket *TokenBucketConfig `yaml:"token_bucket,omitempty"`
+	// LeakyBucket defines parameters for the leaky bucket (GCRA) algorithm.
+	LeakyBucket *LeakyBucketConfig `yaml:"leaky_bucket,omitempty"`
 	// LocalCache opts this rule into node-local burst absorption: requests are
 	// admitted against an in-process cache and periodically reconciled with
 	// Redis, trading a small accuracy window for lower latency and Redis load.
