@@ -97,6 +97,37 @@ func TestLoadParsesAlgorithmSettings(t *testing.T) {
 			},
 		},
 		{
+			name: "leaky bucket",
+			yamlText: strings.Join([]string{
+				"rules:",
+				"  - name: steady-tier",
+				"    match:",
+				"      header: X-Plan",
+				"      value: steady",
+				"    algorithm: leaky_bucket",
+				"    leaky_bucket:",
+				"      limit: 600",
+				"      window: 60s",
+				"      burst: 10",
+				"",
+			}, "\n"),
+			assertion: func(t *testing.T, rule Rule) {
+				t.Helper()
+				if rule.LeakyBucket == nil {
+					t.Fatal("LeakyBucket = nil, want settings")
+				}
+				if rule.LeakyBucket.Limit != 600 {
+					t.Fatalf("LeakyBucket.Limit = %d, want 600", rule.LeakyBucket.Limit)
+				}
+				if rule.LeakyBucket.Window != time.Minute {
+					t.Fatalf("LeakyBucket.Window = %v, want %v", rule.LeakyBucket.Window, time.Minute)
+				}
+				if rule.LeakyBucket.Burst != 10 {
+					t.Fatalf("LeakyBucket.Burst = %d, want 10", rule.LeakyBucket.Burst)
+				}
+			},
+		},
+		{
 			name: "fixed window with local_cache enabled",
 			yamlText: strings.Join([]string{
 				"rules:",
@@ -164,6 +195,15 @@ func TestValidateAcceptsValidConfig(t *testing.T) {
 		{name: "fixed window", cfg: validWindowConfig(FixedWindow)},
 		{name: "sliding window", cfg: validWindowConfig(SlidingWindow)},
 		{name: "token bucket", cfg: validTokenBucketConfig()},
+		{name: "leaky bucket", cfg: validLeakyBucketConfig()},
+		{
+			name: "leaky bucket without burst (defaults to zero value)",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Burst = 0
+				return cfg
+			}(),
+		},
 		{
 			name: "fixed window with local_cache",
 			cfg: func() *Config {
@@ -281,7 +321,7 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 			name: "unknown algorithm",
 			cfg: func() *Config {
 				cfg := validWindowConfig(SlidingWindow)
-				cfg.Rules[0].Algorithm = "leaky_bucket"
+				cfg.Rules[0].Algorithm = "made_up_algorithm"
 				return cfg
 			},
 			wantErr: "unknown algorithm",
@@ -375,6 +415,78 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 				return cfg
 			},
 			wantErr: "token_bucket.rate must be greater than zero",
+		},
+		{
+			name: "missing leaky bucket settings",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket = nil
+				return cfg
+			},
+			wantErr: "leaky_bucket settings must be configured",
+		},
+		{
+			name: "zero leaky bucket limit",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Limit = 0
+				return cfg
+			},
+			wantErr: "leaky_bucket.limit must be greater than zero",
+		},
+		{
+			name: "negative leaky bucket limit",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Limit = -1
+				return cfg
+			},
+			wantErr: "leaky_bucket.limit must be greater than zero",
+		},
+		{
+			name: "zero leaky bucket window",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Window = 0
+				return cfg
+			},
+			wantErr: "leaky_bucket.window must be greater than zero",
+		},
+		{
+			name: "negative leaky bucket window",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Window = -time.Second
+				return cfg
+			},
+			wantErr: "leaky_bucket.window must be greater than zero",
+		},
+		{
+			name: "negative leaky bucket burst",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LeakyBucket.Burst = -1
+				return cfg
+			},
+			wantErr: "leaky_bucket.burst must not be negative",
+		},
+		{
+			name: "leaky bucket rejects local_cache",
+			cfg: func() *Config {
+				cfg := validLeakyBucketConfig()
+				cfg.Rules[0].LocalCache = true
+				return cfg
+			},
+			wantErr: "local_cache is not supported for leaky_bucket",
+		},
+		{
+			name: "fixed window rejects leaky bucket settings",
+			cfg: func() *Config {
+				cfg := validWindowConfig(FixedWindow)
+				cfg.Rules[0].LeakyBucket = &LeakyBucketConfig{Limit: 100, Window: time.Minute}
+				return cfg
+			},
+			wantErr: "leaky_bucket settings only apply when algorithm is \"leaky_bucket\"",
 		},
 		{
 			name: "fixed window rejects token bucket settings",
@@ -502,6 +614,12 @@ func validWindowConfig(algorithm Algorithm) *Config {
 func validTokenBucketConfig() *Config {
 	rule := validBaseRule(TokenBucket)
 	rule.TokenBucket = &TokenBucketConfig{Capacity: 1000, Rate: 200}
+	return &Config{Rules: []Rule{rule}}
+}
+
+func validLeakyBucketConfig() *Config {
+	rule := validBaseRule(LeakyBucket)
+	rule.LeakyBucket = &LeakyBucketConfig{Limit: 600, Window: time.Minute, Burst: 10}
 	return &Config{Rules: []Rule{rule}}
 }
 

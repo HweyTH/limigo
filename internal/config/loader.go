@@ -64,6 +64,8 @@ func validateRule(rule Rule) error {
 		return validateWindowLimit(rule, SlidingWindow, rule.SlidingWindow)
 	case TokenBucket:
 		return validateTokenBucket(rule)
+	case LeakyBucket:
+		return validateLeakyBucket(rule)
 	default:
 		return fmt.Errorf("rule %q: unknown algorithm %q", rule.Name, rule.Algorithm)
 	}
@@ -92,13 +94,28 @@ func validateTokenBucket(rule Rule) error {
 	return validateNoExtraSettings(rule, TokenBucket)
 }
 
+func validateLeakyBucket(rule Rule) error {
+	if rule.LeakyBucket == nil {
+		return fmt.Errorf("rule %q: leaky_bucket settings must be configured", rule.Name)
+	} else if rule.LeakyBucket.Limit <= 0 {
+		return fmt.Errorf("rule %q: leaky_bucket.limit must be greater than zero", rule.Name)
+	} else if rule.LeakyBucket.Window <= 0 {
+		return fmt.Errorf("rule %q: leaky_bucket.window must be greater than zero", rule.Name)
+	} else if rule.LeakyBucket.Burst < 0 {
+		return fmt.Errorf("rule %q: leaky_bucket.burst must not be negative", rule.Name)
+	}
+	return validateNoExtraSettings(rule, LeakyBucket)
+}
+
 // validateLocalCache rejects local_cache on algorithms that cannot support
 // batched delta reconciliation with an authoritative accuracy guarantee.
 // Sliding window's exact rolling-timestamp accuracy is its main advantage
-// over fixed window, so it deliberately does not support batching.
+// over fixed window, so it deliberately does not support batching. Leaky
+// bucket's steady output rate is its entire purpose, and node-local burst
+// absorption would directly undermine that guarantee, so it is rejected too.
 func validateLocalCache(rule Rule) error {
-	if rule.LocalCache && rule.Algorithm == SlidingWindow {
-		return fmt.Errorf("rule %q: local_cache is not supported for %s", rule.Name, SlidingWindow)
+	if rule.LocalCache && (rule.Algorithm == SlidingWindow || rule.Algorithm == LeakyBucket) {
+		return fmt.Errorf("rule %q: local_cache is not supported for %s", rule.Name, rule.Algorithm)
 	}
 	return nil
 }
@@ -112,6 +129,9 @@ func validateNoExtraSettings(rule Rule, algorithm Algorithm) error {
 	}
 	if algorithm != TokenBucket && rule.TokenBucket != nil {
 		return fmt.Errorf("rule %q: token_bucket settings only apply when algorithm is %q", rule.Name, TokenBucket)
+	}
+	if algorithm != LeakyBucket && rule.LeakyBucket != nil {
+		return fmt.Errorf("rule %q: leaky_bucket settings only apply when algorithm is %q", rule.Name, LeakyBucket)
 	}
 	return nil
 }
