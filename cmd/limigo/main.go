@@ -73,11 +73,11 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("ping Redis at %q: %w", opts.redisAddr, err)
 	}
 
-	fixedWindowScript, slidingWindowScript, tokenBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, err := store.LoadEmbeddedScripts()
+	fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, err := store.LoadEmbeddedScripts()
 	if err != nil {
 		return fmt.Errorf("load Lua scripts: %w", err)
 	}
-	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, fixedWindowSyncScript, tokenBucketSyncScript)
+	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript)
 
 	engine, err := rules.Compile(cfg, redisStore)
 	if err != nil {
