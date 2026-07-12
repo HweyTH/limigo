@@ -1,10 +1,10 @@
 # Limigo
 
-Limigo v0.1: Redis-backed distributed and hot-reloadable rate limiter in Go with configurable rules, fixed/sliding/token-bucket algorithms, Lua atomic operations, HTTP check endpoint, Docker Compose quickstart, tests, and basic Prometheus metrics.
+Limigo v0.1: Redis-backed distributed and hot-reloadable rate limiter in Go with configurable rules, fixed/sliding/token-bucket/leaky-bucket algorithms, Lua atomic operations, HTTP check endpoint, Docker Compose quickstart, tests, and basic Prometheus metrics.
 
 ## Rate limiting algorithms
 
-Limigo supports three rate limiting algorithms behind a common interface. They solve the same problem, but with different trade-offs around fairness, burst handling, memory usage, and implementation cost.
+Limigo supports four rate limiting algorithms behind a common interface. They solve the same problem, but with different trade-offs around fairness, burst handling, memory usage, and implementation cost.
 
 ### 1. Fixed window counter
 
@@ -60,6 +60,24 @@ flowchart TD
 ```
 
 Why use it: token bucket is useful when short bursts are acceptable but sustained traffic must stay within a steady rate. It is a good fit for user-facing APIs where occasional spikes should not immediately punish well-behaved clients.
+
+### 4. Leaky bucket (GCRA)
+
+Leaky bucket admits requests on a steady schedule instead of allowing bursts up to a capacity. Limigo implements it as **GCRA** (Generic Cell Rate Algorithm) — the form used in production by Stripe's rate limiter and Redis's `redis-cell` module — which tracks a single value per key: the Theoretical Arrival Time (TAT), the earliest moment the next request is due under perfectly smooth spacing. A request is admitted if it arrives no earlier than a configured tolerance before its TAT; admitting one advances the TAT by one emission interval (`window / limit`), while a denied request leaves the schedule untouched.
+
+Real-life example: a downstream payment processor can sustain 10 requests/second without degrading, and does not benefit from bursty traffic the way an API gateway might. A `leaky_bucket` rule with `limit: 10, window: 1s, burst: 1` smooths a client's requests to one every 100ms, rejecting anything arriving faster — no boundary bursts, no capacity to bank up and spend all at once.
+
+```mermaid
+flowchart TD
+    A["Request arrives at now"] --> B["tat = max(stored_tat, now)"]
+    B --> C{"now >= tat - tolerance?"}
+    C -->|Yes| D["Advance tat += emission_interval; allow"]
+    C -->|No| E["Leave tat unchanged; deny"]
+```
+
+Why use it: leaky bucket is the right choice when downstream capacity is fixed and predictable — the goal is a smooth, steady output rate rather than accommodating bursts. Because local burst-absorption would undermine that guarantee, `leaky_bucket` rules do not support `local_cache` (see below) — every request is checked against the authoritative GCRA schedule in Redis.
+
+**Exact retry timing:** unlike the other three algorithms, GCRA already knows precisely how long a denied client must wait — `allow_at - now` — so Limigo surfaces it instead of discarding it. A denied `/v1/check` response for a leaky bucket rule includes `retry_after_ms` in the JSON body (millisecond precision) and a standard `Retry-After` header (seconds, rounded up) for HTTP-conventional clients and proxies. This turns "you're rate limited" into "you're rate limited, try again in exactly N ms" — the point of choosing a smoothing algorithm in the first place.
 
 ## Design decisions
 
