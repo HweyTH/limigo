@@ -93,6 +93,50 @@ func (manager *WindowManager) Allow(ctx context.Context, key string) (bool, erro
 	}
 }
 
+// LeakyBucketManager manages a pool of LeakyBuckets, one per key.
+// Buckets are created on demand and routed by key on each Allow call.
+// All operations are safe for concurrent use.
+type LeakyBucketManager struct {
+	mu      sync.RWMutex
+	buckets map[string]*LeakyBucket
+	limit   int64
+	window  time.Duration
+	burst   int64
+}
+
+// NewLeakyBucketManager returns a LeakyBucketManager ready for use.
+// limit, window, and burst are passed to each LeakyBucket created on demand —
+// see NewLeakyBucket for their semantics.
+func NewLeakyBucketManager(limit int64, window time.Duration, burst int64) *LeakyBucketManager {
+	return &LeakyBucketManager{
+		buckets: make(map[string]*LeakyBucket),
+		limit:   limit,
+		window:  window,
+		burst:   burst,
+	}
+}
+
+// Allow returns true if the given key is within its rate limit, false if it should
+// be throttled. A bucket is created for the key if one does not already exist.
+// It uses double-checked locking to minimise contention on the common path.
+func (manager *LeakyBucketManager) Allow(ctx context.Context, key string) (bool, error) {
+	manager.mu.RLock()
+	bucket, exists := manager.buckets[key]
+	manager.mu.RUnlock()
+	if exists {
+		return bucket.Allow(ctx, key)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if bucket, exists := manager.buckets[key]; !exists {
+		newBucket := NewLeakyBucket(manager.limit, manager.window, manager.burst)
+		manager.buckets[key] = newBucket
+		return newBucket.Allow(ctx, key)
+	} else {
+		return bucket.Allow(ctx, key)
+	}
+}
+
 // BatchingFixedWindowManager manages a pool of BatchingFixedWindows, one per key.
 // Windows are created on demand and routed by key on each Allow call.
 // All operations are safe for concurrent use.

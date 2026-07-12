@@ -253,6 +253,74 @@ func TestWindowManagerConcurrencyCorrectness(t *testing.T) {
 	})
 }
 
+// TestLeakyBucketManagerIsolation verifies that separate keys maintain
+// independent GCRA schedules — exhausting one key's burst tolerance must not
+// affect another.
+func TestLeakyBucketManagerIsolation(t *testing.T) {
+	limit := int64(10)
+	window := 100 * time.Millisecond
+	burst := int64(2)
+	lbm := NewLeakyBucketManager(limit, window, burst)
+	ctx := context.Background()
+
+	ip1 := "192.168.1.100"
+	ip2 := "10.0.0.5"
+
+	lbm.Allow(ctx, ip1)
+	lbm.Allow(ctx, ip1)
+
+	allowed, err := lbm.Allow(ctx, ip1)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Errorf("expected %s to be blocked after exceeding burst tolerance", ip1)
+	}
+
+	allowed, err = lbm.Allow(ctx, ip2)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Errorf("expected %s to be allowed, manager is leaking state between IPs", ip2)
+	}
+}
+
+// TestLeakyBucketManagerConcurrency verifies that LeakyBucketManager is safe
+// for concurrent use — covering both concurrent writes across distinct keys
+// and concurrent reads on a single shared key.
+func TestLeakyBucketManagerConcurrency(t *testing.T) {
+	limit := int64(5)
+	window := 1 * time.Second
+	lbm := NewLeakyBucketManager(limit, window, 1)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	workers := 500
+
+	t.Run("Concurrent Map Writes", func(t *testing.T) {
+		for i := range workers {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				ip := fmt.Sprintf("192.168.1.%d", id)
+				_, _ = lbm.Allow(ctx, ip)
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	t.Run("Concurrent Read from Single IP", func(t *testing.T) {
+		sharedIP := "203.0.113.1"
+		for range workers {
+			wg.Go(func() {
+				_, _ = lbm.Allow(ctx, sharedIP)
+			})
+		}
+		wg.Wait()
+	})
+}
+
 // TestBatchingFixedWindowManagerIsolation verifies that separate keys maintain
 // independent batching fixed window state — exhausting one key's local limit
 // must not affect another.
