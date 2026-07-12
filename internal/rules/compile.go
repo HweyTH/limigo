@@ -19,6 +19,7 @@ type Store interface {
 	store.FixedWindowStore
 	store.SlidingWindowStore
 	store.TokenBucketStore
+	store.LeakyBucketStore
 	store.FixedWindowSyncStore
 	store.TokenBucketSyncStore
 }
@@ -30,7 +31,7 @@ type CompiledRule struct {
 	Name string
 	// Match defines the request attributes that activate the rule.
 	Match config.Match
-	allow func(ctx context.Context, key string) (bool, error)
+	allow func(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error)
 	// flush reconciles this rule's node-local cache with the backing Store.
 	// It is nil unless the rule opted into local caching (config.Rule.LocalCache).
 	flush func(ctx context.Context) error
@@ -42,8 +43,10 @@ func (r *CompiledRule) Matches(headerName, headerValue string) bool {
 }
 
 // Allow evaluates the rule's configured algorithm for key, returning true if
-// the request is within limit, false if it should be throttled.
-func (r *CompiledRule) Allow(ctx context.Context, key string) (bool, error) {
+// the request is within limit, false if it should be throttled. When denied,
+// retryAfter is the exact duration until the next request will be admitted if
+// the algorithm can compute it (currently only leaky bucket); zero otherwise.
+func (r *CompiledRule) Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error) {
 	return r.allow(ctx, key)
 }
 
@@ -63,6 +66,10 @@ type Decision struct {
 	Matched bool
 	// RuleName identifies the matched rule. It is empty when Matched is false.
 	RuleName string
+	// RetryAfter is the exact duration until the matched rule will next admit
+	// a request, when the algorithm can compute it (currently only leaky
+	// bucket) and the request was denied. It is zero otherwise.
+	RetryAfter time.Duration
 }
 
 // Compile turns cfg's rules into an Engine backed by st. cfg is expected to
@@ -103,9 +110,10 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, error) {
+			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowFixedWindow(ctx, storeKey, limit, window)
+				allowed, err := st.AllowFixedWindow(ctx, storeKey, limit, window)
+				return allowed, 0, err
 			},
 		}, nil
 
@@ -117,9 +125,10 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, error) {
+			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowSlidingWindow(ctx, storeKey, limit, window)
+				allowed, err := st.AllowSlidingWindow(ctx, storeKey, limit, window)
+				return allowed, 0, err
 			},
 		}, nil
 
@@ -134,9 +143,24 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, error) {
+			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowTokenBucket(ctx, storeKey, capacity, rate)
+				allowed, err := st.AllowTokenBucket(ctx, storeKey, capacity, rate)
+				return allowed, 0, err
+			},
+		}, nil
+
+	case config.LeakyBucket:
+		if rule.LeakyBucket == nil {
+			return nil, fmt.Errorf("leaky_bucket settings must be configured")
+		}
+		limit, window, burst := rule.LeakyBucket.Limit, rule.LeakyBucket.Window, rule.LeakyBucket.Burst
+		return &CompiledRule{
+			Name:  rule.Name,
+			Match: rule.Match,
+			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				return st.AllowLeakyBucket(ctx, storeKey, limit, window, burst)
 			},
 		}, nil
 
@@ -155,8 +179,9 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 	return &CompiledRule{
 		Name:  rule.Name,
 		Match: rule.Match,
-		allow: func(ctx context.Context, key string) (bool, error) {
-			return manager.Allow(ctx, key)
+		allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			allowed, err := manager.Allow(ctx, key)
+			return allowed, 0, err
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -188,8 +213,9 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 	return &CompiledRule{
 		Name:  rule.Name,
 		Match: rule.Match,
-		allow: func(ctx context.Context, key string) (bool, error) {
-			return manager.Allow(ctx, key)
+		allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			allowed, err := manager.Allow(ctx, key)
+			return allowed, 0, err
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -249,7 +275,7 @@ func (e *Engine) Evaluate(ctx context.Context, headerName, headerValue, key stri
 	if !ok {
 		return false, false, nil
 	}
-	allowed, err = rule.Allow(ctx, key)
+	allowed, _, err = rule.Allow(ctx, key)
 	return allowed, true, err
 }
 
@@ -263,11 +289,12 @@ func (e *Engine) Check(ctx context.Context, key string, headerValue func(string)
 
 	for _, rule := range e.compiledRules {
 		if headerValue(rule.Match.HeaderName) == rule.Match.Value {
-			allowed, err := rule.Allow(ctx, key)
+			allowed, retryAfter, err := rule.Allow(ctx, key)
 			return Decision{
-				Allowed:  allowed,
-				Matched:  true,
-				RuleName: rule.Name,
+				Allowed:    allowed,
+				Matched:    true,
+				RuleName:   rule.Name,
+				RetryAfter: retryAfter,
 			}, err
 		}
 	}

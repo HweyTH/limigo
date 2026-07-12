@@ -12,10 +12,11 @@ import (
 // fakeStore is an in-memory Store double that records which algorithm was
 // invoked and lets tests script the returned decision.
 type fakeStore struct {
-	allow    bool
-	err      error
-	lastCall string
-	lastKey  string
+	allow           bool
+	err             error
+	lastCall        string
+	lastKey         string
+	leakyRetryAfter time.Duration
 
 	// syncErr, syncTotal, and syncRemaining let tests script the batched
 	// delta-sync methods independently of the direct Allow* methods above.
@@ -43,6 +44,12 @@ func (s *fakeStore) AllowTokenBucket(ctx context.Context, key string, capacity f
 	s.lastCall = "token_bucket"
 	s.lastKey = key
 	return s.allow, s.err
+}
+
+func (s *fakeStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (bool, time.Duration, error) {
+	s.lastCall = "leaky_bucket"
+	s.lastKey = key
+	return s.allow, s.leakyRetryAfter, s.err
 }
 
 func (s *fakeStore) SyncFixedWindow(ctx context.Context, key string, delta int64, window time.Duration) (int64, error) {
@@ -90,6 +97,16 @@ func TestCompile(t *testing.T) {
 						Rate:     1,
 					},
 				},
+				{
+					Name:      "lb-rule",
+					Match:     config.Match{HeaderName: "X-Plan", Value: "lb"},
+					Algorithm: config.LeakyBucket,
+					LeakyBucket: &config.LeakyBucketConfig{
+						Limit:  10,
+						Window: time.Second,
+						Burst:  1,
+					},
+				},
 			},
 		}
 
@@ -97,8 +114,8 @@ func TestCompile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(engine.compiledRules) != 3 {
-			t.Fatalf("expected 3 compiled rules, got %d", len(engine.compiledRules))
+		if len(engine.compiledRules) != 4 {
+			t.Fatalf("expected 4 compiled rules, got %d", len(engine.compiledRules))
 		}
 	})
 
@@ -134,6 +151,17 @@ func TestCompile(t *testing.T) {
 		}
 		if _, err := Compile(cfg, &fakeStore{}); err == nil {
 			t.Fatal("expected error when token_bucket settings are missing")
+		}
+	})
+
+	t.Run("UnhappyPathMissingLeakyBucketSettingsReturnsError", func(t *testing.T) {
+		cfg := &config.Config{
+			Rules: []config.Rule{
+				{Name: "missing-settings", Algorithm: config.LeakyBucket},
+			},
+		}
+		if _, err := Compile(cfg, &fakeStore{}); err == nil {
+			t.Fatal("expected error when leaky_bucket settings are missing")
 		}
 	})
 }
@@ -246,6 +274,16 @@ func TestEngineCheck(t *testing.T) {
 						Rate:     100,
 					},
 				},
+				{
+					Name:      "steady-tier",
+					Match:     config.Match{HeaderName: "X-Plan", Value: "steady"},
+					Algorithm: config.LeakyBucket,
+					LeakyBucket: &config.LeakyBucketConfig{
+						Limit:  600,
+						Window: time.Minute,
+						Burst:  10,
+					},
+				},
 			},
 		}
 		engine, err := Compile(cfg, store)
@@ -282,6 +320,69 @@ func TestEngineCheck(t *testing.T) {
 		}
 		if store.lastKey != "limigo:pro-tier:client-1" {
 			t.Fatalf("store key = %q, want limigo:pro-tier:client-1", store.lastKey)
+		}
+	})
+
+	t.Run("HappyPathRoutesLeakyBucketRule", func(t *testing.T) {
+		store := &fakeStore{allow: true}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(name string) string {
+			return "steady"
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !decision.Matched {
+			t.Fatal("expected a rule to match")
+		}
+		if !decision.Allowed {
+			t.Fatal("expected request to be allowed")
+		}
+		if decision.RuleName != "steady-tier" {
+			t.Fatalf("RuleName = %q, want steady-tier", decision.RuleName)
+		}
+		if store.lastCall != "leaky_bucket" {
+			t.Fatalf("expected leaky_bucket to be invoked, got %q", store.lastCall)
+		}
+		if store.lastKey != "limigo:steady-tier:client-1" {
+			t.Fatalf("store key = %q, want limigo:steady-tier:client-1", store.lastKey)
+		}
+	})
+
+	t.Run("DeniedLeakyBucketPropagatesRetryAfter", func(t *testing.T) {
+		store := &fakeStore{allow: false, leakyRetryAfter: 37 * time.Millisecond}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(name string) string {
+			return "steady"
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if decision.Allowed {
+			t.Fatal("expected request to be denied")
+		}
+		if decision.RetryAfter != 37*time.Millisecond {
+			t.Fatalf("RetryAfter = %v, want 37ms", decision.RetryAfter)
+		}
+	})
+
+	t.Run("DeniedTokenBucketDoesNotSetRetryAfter", func(t *testing.T) {
+		store := &fakeStore{allow: false}
+		engine := newEngine(t, store)
+
+		decision, err := engine.Check(context.Background(), "client-1", func(name string) string {
+			return "pro"
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if decision.Allowed {
+			t.Fatal("expected request to be denied")
+		}
+		if decision.RetryAfter != 0 {
+			t.Fatalf("RetryAfter = %v, want 0 for an algorithm that cannot compute it", decision.RetryAfter)
 		}
 	})
 
