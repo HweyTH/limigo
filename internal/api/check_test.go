@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hweyth/limigo/internal/rules"
 )
@@ -62,6 +63,40 @@ func TestNewCheckHandler(t *testing.T) {
 		assertStatus(t, recorder, http.StatusOK)
 		response := decodeCheckResponse(t, recorder)
 		assertResponse(t, response, checkResponse{Allowed: false, Matched: false})
+	})
+
+	t.Run("HappyPathDeniedLeakyBucketIncludesRetryAfter", func(t *testing.T) {
+		checker := &fakeChecker{decision: rules.Decision{
+			Allowed:    false,
+			Matched:    true,
+			RuleName:   "steady-tier",
+			RetryAfter: 1500 * time.Millisecond,
+		}}
+		recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "steady")
+
+		assertStatus(t, recorder, http.StatusOK)
+		response := decodeCheckResponse(t, recorder)
+		assertResponse(t, response, checkResponse{
+			Allowed:      false,
+			Matched:      true,
+			Rule:         "steady-tier",
+			RetryAfterMs: 1500,
+		})
+		if got := recorder.Header().Get("Retry-After"); got != "2" {
+			t.Fatalf("Retry-After header = %q, want 2 (ceil of 1.5s)", got)
+		}
+	})
+
+	t.Run("HappyPathAllowedResponseOmitsRetryAfter", func(t *testing.T) {
+		checker := &fakeChecker{decision: rules.Decision{Allowed: true, Matched: true, RuleName: "steady-tier"}}
+		recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "steady")
+
+		assertStatus(t, recorder, http.StatusOK)
+		response := decodeCheckResponse(t, recorder)
+		assertResponse(t, response, checkResponse{Allowed: true, Matched: true, Rule: "steady-tier"})
+		if got := recorder.Header().Get("Retry-After"); got != "" {
+			t.Fatalf("Retry-After header = %q, want empty for an allowed request", got)
+		}
 	})
 
 	t.Run("UnhappyPathInvalidJSON", func(t *testing.T) {

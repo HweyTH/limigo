@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hweyth/limigo/internal/rules"
 )
@@ -22,6 +25,10 @@ type checkResponse struct {
 	Allowed bool   `json:"allowed"`
 	Matched bool   `json:"matched"`
 	Rule    string `json:"rule,omitempty"`
+	// RetryAfterMs is the exact number of milliseconds until the matched
+	// rule will next admit a request, when the algorithm can compute it
+	// (currently only leaky bucket). Omitted when not applicable.
+	RetryAfterMs int64 `json:"retry_after_ms,omitempty"`
 }
 
 // NewCheckHandler returns an HTTP handler for POST /v1/check requests.
@@ -47,20 +54,35 @@ func NewCheckHandler(engine Checker) http.Handler {
 
 		decision, err := engine.Check(r.Context(), key, r.Header.Get)
 		if err != nil {
+			setRetryAfterHeader(w, decision.RetryAfter)
 			writeJSON(w, http.StatusServiceUnavailable, checkResponse{
-				Allowed: false,
-				Matched: decision.Matched,
-				Rule:    decision.RuleName,
+				Allowed:      false,
+				Matched:      decision.Matched,
+				Rule:         decision.RuleName,
+				RetryAfterMs: decision.RetryAfter.Milliseconds(),
 			})
 			return
 		}
 
+		setRetryAfterHeader(w, decision.RetryAfter)
 		writeJSON(w, http.StatusOK, checkResponse{
-			Allowed: decision.Allowed,
-			Matched: decision.Matched,
-			Rule:    decision.RuleName,
+			Allowed:      decision.Allowed,
+			Matched:      decision.Matched,
+			Rule:         decision.RuleName,
+			RetryAfterMs: decision.RetryAfter.Milliseconds(),
 		})
 	})
+}
+
+// setRetryAfterHeader sets the standard Retry-After header, rounded up to
+// whole seconds so a client never retries before the schedule allows it. It
+// is a no-op when retryAfter is zero (not applicable or request was allowed).
+func setRetryAfterHeader(w http.ResponseWriter, retryAfter time.Duration) {
+	if retryAfter <= 0 {
+		return
+	}
+	seconds := int64(math.Ceil(retryAfter.Seconds()))
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 }
 
 func writeJSON(w http.ResponseWriter, status int, response checkResponse) {
