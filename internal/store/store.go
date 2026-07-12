@@ -33,6 +33,18 @@ type TokenBucketStore interface {
 	AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error)
 }
 
+// LeakyBucketStore is the backing store interface for the leaky bucket
+// algorithm (GCRA). Implementations must execute the schedule-check-and-advance
+// atomically to prevent race conditions in a multi-node deployment.
+type LeakyBucketStore interface {
+	// AllowLeakyBucket admits one request against key's GCRA schedule, derived
+	// from limit, window, and burst, returning true if the request arrived on
+	// schedule, false if it arrived too early and should be throttled. When
+	// denied, retryAfter is the exact duration until the schedule will next
+	// admit a request for key; it is zero when allowed.
+	AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (allowed bool, retryAfter time.Duration, err error)
+}
+
 // FixedWindowSyncStore reconciles a batch of already-admitted local requests
 // with the authoritative fixed window counter, for callers using node-local
 // caching to absorb bursts between synchronous Redis round-trips.
