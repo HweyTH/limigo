@@ -7,6 +7,7 @@ before (or alongside) implementing the plan in this repo's planning docs, so you
 
 ## Table of contents
 
+0. [Build order — the sequence that keeps the code compiling at every step](#0-build-order--the-sequence-that-keeps-the-code-compiling-at-every-step)
 1. [The one-paragraph mental model](#1-the-one-paragraph-mental-model)
 2. [What a metric actually is](#2-what-a-metric-actually-is)
 3. [The four metric types (and why each fits)](#3-the-four-metric-types-and-why-each-fits)
@@ -20,6 +21,57 @@ before (or alongside) implementing the plan in this repo's planning docs, so you
 11. [The Docker glue](#11-the-docker-glue-how-the-three-programs-find-each-other)
 12. [How we test it](#12-how-we-test-it)
 13. [Decisions log](#13-decisions-log)
+
+---
+
+## 0. Build order — the sequence that keeps the code compiling at every step
+
+None of this exists yet: there is no `internal/metrics` package, no
+`prometheus/client_golang` in `go.mod`, no `docker-compose.yml`, no `Dockerfile`, and
+`grafana/` is an empty tracked directory. `rules.Compile` currently takes only
+`(cfg, st)` and `api.NewCheckHandler` takes only `(engine)` — both gain a recorder
+parameter, which cascades into every call site, including tests. Doing the pieces in
+the wrong order leaves the repo non-compiling partway through, so build in this order:
+
+1. **Add the dependency.** `go get github.com/prometheus/client_golang` — nothing
+   below compiles without it (it's currently absent from `go.mod`, not even as an
+   indirect require).
+2. **`internal/metrics` package** (§5): the `Metrics` struct, `New(reg)`, and every
+   semantic recorder method (`RecordRequest`, `ObserveRedisLatency`,
+   `ObserveLuaExecution`, `SetTokenBucketFillRatio`, `ClearTokenBucketFillRatio`,
+   `IncConfigReload`) plus `Handler()` (§10). This package imports nothing from the
+   rest of the project, so it compiles standalone — write and unit-test it first (§12).
+3. **Narrow interfaces at the consumers** (§6): add `LatencyRecorder` to
+   `internal/store/store.go`, thread it through `NewRedisStore`'s constructor and the
+   `Allow*`/`Sync*` methods. Add `FillRatioRecorder` to `internal/rules` and thread it
+   through `Compile`'s signature (`Compile(cfg, st, recorder)`) into
+   `compileBatchingTokenBucket` specifically (see the delta==0 caveat in §9 — the
+   fixed-window batching path has no fill-ratio equivalent, only token bucket does).
+   Add `RequestRecorder` to `internal/api` and thread it through
+   `NewCheckHandler(engine, recorder)`.
+   **This step breaks every existing call site until finished**: `cmd/limigo/main.go`,
+   `internal/rules/compile_test.go`, and `internal/api/check_test.go` all call these
+   constructors today and must be updated in the same change, or the build fails.
+4. **The Lua `TIME` change** (§7): update all six `.lua` scripts and their matching
+   parse logic in `redis.go`. `redis_store_test.go` and any Lua-return-shape
+   assumptions in tests must be re-verified — the public Go method signatures don't
+   change, but the internal `.Int()` → `.Int64Slice()` parsing does, script by script.
+5. **Wire `main.go`** (§10): construct `reg`/`m` first, inject into `RedisStore`,
+   `Compile`, `NewCheckHandler`; add the second `:9091` listener and its shutdown path;
+   add the `config_reload_total` increments in the `onChange` closure.
+6. **Docker glue** (§11): `Dockerfile`, `docker-compose.yml`,
+   `prometheus/prometheus.yml`, `grafana/provisioning/datasources/prometheus.yml`,
+   **and** `grafana/provisioning/dashboards/dashboard.yml` (the provider config — see
+   the correction in §11, the guide previously implied the JSON alone was enough),
+   `grafana/dashboard.json`. Add the 5th `local_cache: true` rule to
+   `config.example.yaml` (decision #15) so the fill-ratio panel isn't empty on first
+   boot.
+7. **Delete the two stale untracked files** in `internal/api/` (see the corrected
+   decision #14 — they are an *older* version of `check.go`/`check_test.go`, not a
+   duplicate, and must not be confused with the files you're editing in step 3).
+8. **`docker-compose up`, hit `curl localhost:9091/metrics`, open `localhost:3000`**
+   and confirm all 6 panels render before calling it done — nothing above proves the
+   wiring actually works end to end.
 
 ---
 
@@ -127,6 +179,11 @@ Buckets: []float64{0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01,
 ---
 
 ## 5. The `internal/metrics` package — syntax walk-through
+
+`github.com/prometheus/client_golang` isn't in `go.mod` yet (not even as an indirect
+dependency) — this is the first thing to add: `go get github.com/prometheus/client_golang`.
+Everything below imports `github.com/prometheus/client_golang/prometheus` and, for the
+`/metrics` handler in §10, `.../prometheus/promhttp`.
 
 ### The struct + constructor
 
@@ -332,21 +389,51 @@ func (b *BatchingTokenBucket) FillRatio() float64 {
 ```
 
 Then in the flush closure (which only exists for `local_cache: true` rules — so the gauge
-automatically scopes itself to exactly those rules, which is what we want):
+automatically scopes itself to exactly those rules, which is what we want). This is
+`compileBatchingTokenBucket`'s `flush` closure in `internal/rules/compile.go` today
+(around line 220), and it already has a loop over `manager.Snapshot()` that you're
+extending, not writing from scratch:
 
 ```go
-snapshot := manager.Snapshot()
-var sum float64
-for _, tb := range snapshot {
-    sum += tb.FillRatio()
-    // ... existing Redis-sync work ...
-}
-if len(snapshot) > 0 {
-    rec.SetTokenBucketFillRatio(rule.Name, sum/float64(len(snapshot))) // mean
-} else {
-    rec.ClearTokenBucketFillRatio(rule.Name) // no buckets → remove series (Grafana shows "no data")
-}
+flush: func(ctx context.Context) error {
+    var errs error
+    snapshot := manager.Snapshot()
+    var sum float64
+    for key, tb := range snapshot {
+        sum += tb.FillRatio() // ← new: compute for every bucket, before the delta==0 skip below
+        delta := tb.PendingDelta()
+        if delta == 0 {
+            continue // idle bucket, nothing to sync to Redis — but it still counted above
+        }
+        storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+        remaining, err := st.SyncTokenBucket(ctx, storeKey, delta, capacity, rate)
+        if err != nil {
+            errs = errors.Join(errs, fmt.Errorf("sync token bucket %q: %w", storeKey, err))
+            continue
+        }
+        tb.ApplyRemoteTotal(delta, remaining)
+    }
+    if len(snapshot) > 0 {
+        recorder.SetTokenBucketFillRatio(rule.Name, sum/float64(len(snapshot))) // mean
+    } else {
+        recorder.ClearTokenBucketFillRatio(rule.Name) // no buckets → remove series (Grafana shows "no data")
+    }
+    return errs
+},
 ```
+
+**The ordering matters and is easy to get wrong:** the existing code has an early
+`continue` when `delta == 0` (an idle bucket — nothing to reconcile with Redis). If you
+naively drop the fill-ratio line in *after* that `continue`, every idle bucket silently
+falls out of the average — a fleet where most keys are quiet would report a fill ratio
+computed from only the few currently-active ones, which is misleading. `tb.FillRatio()`
+must run before that `continue`.
+
+**Also note the signature change this implies**: `compileBatchingTokenBucket` doesn't
+currently receive anything besides `rule, st, capacity, rate` — it needs a `recorder
+FillRatioRecorder` parameter, which means `Compile` needs one too, which means every
+caller of `Compile` (production `main.go` and `compile_test.go`) needs updating in the
+same change (see [§0](#0-build-order--the-sequence-that-keeps-the-code-compiling-at-every-step)).
 
 The `Clear` (which calls `DeleteLabelValues`) matters: if all buckets go idle and you *kept*
 setting `0`, Grafana would draw a solid line at "empty," which is wrong. Deleting the series makes
@@ -375,7 +462,7 @@ mux.Handle("/v1/check", api.NewCheckHandler(holder, m))
 
 // SEPARATE listener for metrics:
 metricsMux := http.NewServeMux()
-metricsMux.Handle("/metrics", m.Handler())
+metricsMux.Handle("/metrics", m.Handler()) // wraps promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 metricsServer := &http.Server{Addr: opts.metricsAddr, Handler: metricsMux}
 ```
 
@@ -449,9 +536,29 @@ other by service name** (Docker provides DNS). That's the whole trick:
   — no clicking through the Grafana UI after every `up`.
 - **Your app** finds Redis via `REDIS_ADDR=redis:6379`.
 
-The `grafana/dashboard.json` is just an exported dashboard definition (6 panels, each holding a
-PromQL query — see §4 and the panel list below). Dropping it in the provisioned folder means it's
-there the moment Grafana boots.
+**Two separate provisioning files are needed for the dashboard, not one.** It's tempting
+to think dropping `grafana/dashboard.json` into the provisioned folder is sufficient —
+it isn't. Grafana also needs a *dashboard provider* config telling it "watch this
+folder for JSON dashboard files":
+
+```yaml
+# grafana/provisioning/dashboards/dashboard.yml
+apiVersion: 1
+providers:
+  - name: limigo
+    folder: ""
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
+```
+
+Only with both files present — the provider YAML *and* the dashboard JSON, mounted at
+the path the provider points to — does the dashboard appear automatically on boot.
+Missing the provider file is a common way to end up with an empty Grafana on first
+`docker-compose up` and no error message explaining why.
+
+The `grafana/dashboard.json` itself is just an exported dashboard definition (6 panels, each
+holding a PromQL query — see §4 and the panel list below).
 
 The `Dockerfile` is a standard **multi-stage build**: stage 1 uses `golang:1.25` to compile a
 static binary; stage 2 copies *just the binary* + `config.example.yaml` into a tiny base image
@@ -508,6 +615,6 @@ Design questions resolved before implementation, with the reasoning:
 | 11 | Metrics collection always-on (no toggle in business logic); only the listener itself can be disabled via empty `-metrics-addr` | A toggle would force nil-checks throughout business logic — a reliability hazard for a feature with near-zero cost |
 | 12 | `config_reload_total` gets a `result` label (`success`/`failure`), four increment sites in the existing `onChange` closure | Silent hot-reload failures are a real, nasty production confusion class |
 | 13 | `algorithm` label (6 values) added to both latency histograms, even though CLAUDE.md's spec didn't list labels for them | Different Lua scripts have very different cost profiles; collapsing them hides which algorithm caused a latency regression |
-| 14 | Two stale untracked backup files in `internal/api/` deleted as a separate first commit | Confirmed byte-for-byte duplicates, referenced nowhere; kept out of the metrics diff per "minimal changes" |
+| 14 | Two stale untracked backup files in `internal/api/` (`check.go.2177291543493384489`, `check_test.go.8877820067834685568`) deleted as a separate first commit | **Correction: not byte-for-byte duplicates** — diffing them against the real `check.go`/`check_test.go` shows they're an *older* version, predating the leaky-bucket `RetryAfter`/`Retry-After` header work (no `math`/`time`/`strconv` imports, no `RetryAfterMs` field, missing the two leaky-bucket test cases). They're superseded and referenced nowhere, so deleting them is still correct — just don't mistake them for a divergent copy worth reconciling; they're simply behind |
 | 15 | Add a 5th `local_cache: true` token-bucket rule to `config.example.yaml` | Without it, the fill-ratio gauge and its dashboard panel are empty on a default `docker-compose up`; keeps the original four rules as pure-Redis examples |
 | 16 | `/metrics` bind failure is **fatal at startup**, but the two HTTP listeners remain fully independent so a runtime metrics fault can't take down `:8080` | A running-but-unobservable service is silent misbehavior; the failure mode is a deterministic local misconfiguration, the textbook fail-fast case |
