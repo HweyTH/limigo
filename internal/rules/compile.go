@@ -24,6 +24,15 @@ type Store interface {
 	store.TokenBucketSyncStore
 }
 
+// FillRatioRecorder receives the mean fill ratio of a rule's node-local token
+// buckets, sampled on every flush. ClearTokenBucketFillRatio removes a rule's
+// series entirely when it has no buckets, so a dashboard reads "no data"
+// rather than a misleading flat zero.
+type FillRatioRecorder interface {
+	SetTokenBucketFillRatio(rule string, ratio float64)
+	ClearTokenBucketFillRatio(rule string)
+}
+
 // CompiledRule pairs a rule's request matcher with a closure that evaluates
 // the rule's configured algorithm against the backing Store.
 type CompiledRule struct {
@@ -76,7 +85,7 @@ type Decision struct {
 // have already passed config.Validate; Compile still checks that each rule's
 // algorithm-specific settings are present so a bad rule fails loudly at
 // startup rather than panicking at request time.
-func Compile(cfg *config.Config, st Store) (*Engine, error) {
+func Compile(cfg *config.Config, st Store, recorder FillRatioRecorder) (*Engine, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config must not be nil")
 	}
@@ -86,7 +95,7 @@ func Compile(cfg *config.Config, st Store) (*Engine, error) {
 
 	compiledRules := make([]*CompiledRule, 0, len(cfg.Rules))
 	for _, rule := range cfg.Rules {
-		compiledRule, err := compileRule(rule, st)
+		compiledRule, err := compileRule(rule, st, recorder)
 		if err != nil {
 			return nil, fmt.Errorf("compile rule %q: %w", rule.Name, err)
 		}
@@ -97,7 +106,7 @@ func Compile(cfg *config.Config, st Store) (*Engine, error) {
 
 // compileRule chooses the correct algorithm for rule and binds it to st,
 // returning a CompiledRule ready for matching and evaluation.
-func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
+func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*CompiledRule, error) {
 	switch rule.Algorithm {
 	case config.FixedWindow:
 		if rule.FixedWindow == nil {
@@ -138,7 +147,7 @@ func compileRule(rule config.Rule, st Store) (*CompiledRule, error) {
 		}
 		capacity, rate := rule.TokenBucket.Capacity, rule.TokenBucket.Rate
 		if rule.LocalCache {
-			return compileBatchingTokenBucket(rule, st, capacity, rate), nil
+			return compileBatchingTokenBucket(rule, st, capacity, rate, recorder), nil
 		}
 		return &CompiledRule{
 			Name:  rule.Name,
@@ -208,7 +217,7 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 // of calling st on every request, trading a small accuracy window for lower
 // request latency and reduced load on st. flush reconciles the local cache
 // with st and must be driven periodically by the caller (see Engine.FlushLocalCaches).
-func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float64) *CompiledRule {
+func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float64, recorder FillRatioRecorder) *CompiledRule {
 	manager := limiter.NewBatchingTokenBucketManager(capacity, rate)
 	return &CompiledRule{
 		Name:  rule.Name,
@@ -219,7 +228,10 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
-			for key, tb := range manager.Snapshot() {
+			snapshot := manager.Snapshot()
+			var sum float64
+			for key, tb := range snapshot {
+				sum += tb.FillRatio()
 				delta := tb.PendingDelta()
 				if delta == 0 {
 					continue
@@ -231,6 +243,11 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 					continue
 				}
 				tb.ApplyRemoteTotal(delta, remaining)
+			}
+			if len(snapshot) > 0 {
+				recorder.SetTokenBucketFillRatio(rule.Name, sum/float64(len(snapshot)))
+			} else {
+				recorder.ClearTokenBucketFillRatio(rule.Name)
 			}
 			return errs
 		},

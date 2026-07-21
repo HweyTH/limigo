@@ -17,8 +17,10 @@ import (
 
 	"github.com/hweyth/limigo/internal/api"
 	"github.com/hweyth/limigo/internal/config"
+	"github.com/hweyth/limigo/internal/metrics"
 	"github.com/hweyth/limigo/internal/rules"
 	"github.com/hweyth/limigo/internal/store"
+	"github.com/prometheus/client_golang/prometheus"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -73,13 +75,19 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("ping Redis at %q: %w", opts.redisAddr, err)
 	}
 
+	reg := prometheus.NewRegistry()
+	m, err := metrics.New(reg)
+	if err != nil {
+		return fmt.Errorf("init metrics: %w", err)
+	}
+
 	fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, err := store.LoadEmbeddedScripts()
 	if err != nil {
 		return fmt.Errorf("load Lua scripts: %w", err)
 	}
-	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript)
+	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, m)
 
-	engine, err := rules.Compile(cfg, redisStore)
+	engine, err := rules.Compile(cfg, redisStore, m)
 	if err != nil {
 		return fmt.Errorf("compile rules: %w", err)
 	}
@@ -87,7 +95,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	holder := rules.NewEngineHolder(engine)
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/check", api.NewCheckHandler(holder))
+	mux.Handle("/v1/check", api.NewCheckHandler(holder, m))
 
 	server := &http.Server{
 		Addr:    opts.httpAddr,
@@ -112,7 +120,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
 				return
 			}
-			newEngine, err := rules.Compile(newCfg, redisStore)
+			newEngine, err := rules.Compile(newCfg, redisStore, m)
 			if err != nil {
 				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
 				return

@@ -22,11 +22,18 @@ var (
 	redisKeyCounter atomic.Uint64
 )
 
+// fakeLatencyRecorder is a LatencyRecorder double that discards every
+// observation, for tests that don't assert on recorded latency.
+type fakeLatencyRecorder struct{}
+
+func (fakeLatencyRecorder) ObserveRedisLatency(algorithm string, d time.Duration) {}
+func (fakeLatencyRecorder) ObserveLuaExecution(algorithm string, d time.Duration) {}
+
 // newTestRedisStore returns a RedisStore using the process-wide testcontainer Redis.
 func newTestRedisStore() *RedisStore {
 	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript)
+	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
 }
 
 // redisTestKey returns a unique key per test case to avoid cross-test state leaks.
@@ -1127,7 +1134,7 @@ func TestDisconnectedClient(t *testing.T) {
 
 	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	store := NewRedisStore(badClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript)
+	store := NewRedisStore(badClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
 	ctx := context.Background()
 
 	t.Run("Fixed Window Fail Closed", func(t *testing.T) {

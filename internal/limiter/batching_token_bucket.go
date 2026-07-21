@@ -50,6 +50,25 @@ func (b *BatchingTokenBucket) PendingDelta() float64 {
 	return b.pendingDelta
 }
 
+// FillRatio returns the bucket's local view of how full it is, as a value
+// clamped to [0,1]: (remoteTokens - pendingDelta) / capacity. A non-positive
+// capacity returns 0 rather than dividing by zero.
+func (b *BatchingTokenBucket) FillRatio() float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.capacity <= 0 {
+		return 0
+	}
+	ratio := (b.remoteTokens - b.pendingDelta) / b.capacity
+	if ratio < 0 {
+		return 0
+	}
+	if ratio > 1 {
+		return 1
+	}
+	return ratio
+}
+
 // ApplyRemoteTotal reconciles a successful flush. flushed is the delta value
 // that was just synced to the backing store (the value PendingDelta returned
 // before the flush began), and remaining is the authoritative token count the

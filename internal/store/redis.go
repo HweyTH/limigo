@@ -19,6 +19,7 @@ type RedisStore struct {
 	leakyBucketScript     *redis.Script
 	fixedWindowSyncScript *redis.Script
 	tokenBucketSyncScript *redis.Script
+	recorder              LatencyRecorder
 }
 
 // NewRedisStore returns a RedisStore backed by the given Redis client.
@@ -26,7 +27,8 @@ type RedisStore struct {
 // window, sliding window, token bucket, and leaky bucket algorithms respectively.
 // fwSyncScript and tbSyncScript are the Lua source strings for the batched delta-sync
 // variants of the fixed window and token bucket algorithms, used by node-local caching.
-func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, tbScript string, lbScript string, fwSyncScript string, tbSyncScript string) *RedisStore {
+// recorder observes the round-trip latency of every script execution, labeled by algorithm.
+func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, tbScript string, lbScript string, fwSyncScript string, tbSyncScript string, recorder LatencyRecorder) *RedisStore {
 	newRedisStore := RedisStore{
 		client:                redisClient,
 		fixedWindowScript:     redis.NewScript(fwScript),
@@ -35,6 +37,7 @@ func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, 
 		leakyBucketScript:     redis.NewScript(lbScript),
 		fixedWindowSyncScript: redis.NewScript(fwSyncScript),
 		tokenBucketSyncScript: redis.NewScript(tbSyncScript),
+		recorder:              recorder,
 	}
 	return &newRedisStore
 }
@@ -43,7 +46,9 @@ func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, 
 // and returns true if the count is within limit, false if it should be throttled.
 // The window resets automatically when the Redis key expires.
 func (store *RedisStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+	start := time.Now()
 	cmd := store.fixedWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
+	store.recorder.ObserveRedisLatency("fixed_window", time.Since(start))
 
 	res, err := cmd.Int()
 	if err != nil {
@@ -56,7 +61,9 @@ func (store *RedisStore) AllowFixedWindow(ctx context.Context, key string, limit
 // returns true if the number of requests within the rolling window is within limit,
 // false if it should be throttled.
 func (store *RedisStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+	start := time.Now()
 	cmd := store.slidingWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
+	store.recorder.ObserveRedisLatency("sliding_window", time.Since(start))
 
 	res, err := cmd.Int()
 	if err != nil {
@@ -69,7 +76,9 @@ func (store *RedisStore) AllowSlidingWindow(ctx context.Context, key string, lim
 // based on elapsed time and rate. Returns true if a token was consumed, false if the
 // bucket is empty and the request should be throttled.
 func (store *RedisStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error) {
+	start := time.Now()
 	cmd := store.tokenBucketScript.Run(ctx, store.client, []string{key}, capacity, rate)
+	store.recorder.ObserveRedisLatency("token_bucket", time.Since(start))
 
 	res, err := cmd.Int()
 	if err != nil {
@@ -91,7 +100,9 @@ func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit
 	emissionIntervalMs := float64(window.Milliseconds()) / float64(limit)
 	toleranceMs := emissionIntervalMs * float64(burst-1)
 
+	start := time.Now()
 	cmd := store.leakyBucketScript.Run(ctx, store.client, []string{key}, emissionIntervalMs, toleranceMs)
+	store.recorder.ObserveRedisLatency("leaky_bucket", time.Since(start))
 
 	res, err := cmd.Int64Slice()
 	if err != nil {
@@ -103,7 +114,9 @@ func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit
 // SyncFixedWindow folds delta (requests already admitted locally since the last
 // sync) into the authoritative counter for key and returns the resulting total.
 func (store *RedisStore) SyncFixedWindow(ctx context.Context, key string, delta int64, window time.Duration) (int64, error) {
+	start := time.Now()
 	cmd := store.fixedWindowSyncScript.Run(ctx, store.client, []string{key}, delta, window.Milliseconds())
+	store.recorder.ObserveRedisLatency("fixed_window_sync", time.Since(start))
 
 	total, err := cmd.Int64()
 	if err != nil {
@@ -117,7 +130,9 @@ func (store *RedisStore) SyncFixedWindow(ctx context.Context, key string, delta 
 // resulting token count. The result can be negative, signaling local over-admission
 // during the interval since the last sync.
 func (store *RedisStore) SyncTokenBucket(ctx context.Context, key string, delta float64, capacity float64, rate float64) (float64, error) {
+	start := time.Now()
 	cmd := store.tokenBucketSyncScript.Run(ctx, store.client, []string{key}, capacity, rate, delta)
+	store.recorder.ObserveRedisLatency("token_bucket_sync", time.Since(start))
 
 	remaining, err := cmd.Float64()
 	if err != nil {

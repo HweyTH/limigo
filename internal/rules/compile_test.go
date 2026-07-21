@@ -28,6 +28,28 @@ type fakeStore struct {
 	lastSyncDelta float64
 }
 
+// fakeFillRatioRecorder is a FillRatioRecorder double that records the last
+// ratio set or clear per rule, for tests that don't care about fill ratio to
+// pass without a real metrics implementation.
+type fakeFillRatioRecorder struct {
+	set     map[string]float64
+	cleared map[string]bool
+}
+
+func newFakeFillRatioRecorder() *fakeFillRatioRecorder {
+	return &fakeFillRatioRecorder{set: map[string]float64{}, cleared: map[string]bool{}}
+}
+
+func (r *fakeFillRatioRecorder) SetTokenBucketFillRatio(rule string, ratio float64) {
+	r.set[rule] = ratio
+	delete(r.cleared, rule)
+}
+
+func (r *fakeFillRatioRecorder) ClearTokenBucketFillRatio(rule string) {
+	r.cleared[rule] = true
+	delete(r.set, rule)
+}
+
 func (s *fakeStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
 	s.lastCall = "fixed_window"
 	s.lastKey = key
@@ -110,7 +132,7 @@ func TestCompile(t *testing.T) {
 			},
 		}
 
-		engine, err := Compile(cfg, &fakeStore{allow: true})
+		engine, err := Compile(cfg, &fakeStore{allow: true}, newFakeFillRatioRecorder())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -120,14 +142,14 @@ func TestCompile(t *testing.T) {
 	})
 
 	t.Run("UnhappyPathNilConfigReturnsError", func(t *testing.T) {
-		if _, err := Compile(nil, &fakeStore{}); err == nil {
+		if _, err := Compile(nil, &fakeStore{}, newFakeFillRatioRecorder()); err == nil {
 			t.Fatal("expected error for nil config")
 		}
 	})
 
 	t.Run("UnhappyPathNilStoreReturnsError", func(t *testing.T) {
 		cfg := &config.Config{}
-		if _, err := Compile(cfg, nil); err == nil {
+		if _, err := Compile(cfg, nil, newFakeFillRatioRecorder()); err == nil {
 			t.Fatal("expected error for nil store")
 		}
 	})
@@ -138,7 +160,7 @@ func TestCompile(t *testing.T) {
 				{Name: "bad-rule", Algorithm: config.Algorithm("unknown")},
 			},
 		}
-		if _, err := Compile(cfg, &fakeStore{}); err == nil {
+		if _, err := Compile(cfg, &fakeStore{}, newFakeFillRatioRecorder()); err == nil {
 			t.Fatal("expected error for unknown algorithm")
 		}
 	})
@@ -149,7 +171,7 @@ func TestCompile(t *testing.T) {
 				{Name: "missing-settings", Algorithm: config.TokenBucket},
 			},
 		}
-		if _, err := Compile(cfg, &fakeStore{}); err == nil {
+		if _, err := Compile(cfg, &fakeStore{}, newFakeFillRatioRecorder()); err == nil {
 			t.Fatal("expected error when token_bucket settings are missing")
 		}
 	})
@@ -160,7 +182,7 @@ func TestCompile(t *testing.T) {
 				{Name: "missing-settings", Algorithm: config.LeakyBucket},
 			},
 		}
-		if _, err := Compile(cfg, &fakeStore{}); err == nil {
+		if _, err := Compile(cfg, &fakeStore{}, newFakeFillRatioRecorder()); err == nil {
 			t.Fatal("expected error when leaky_bucket settings are missing")
 		}
 	})
@@ -191,7 +213,7 @@ func TestEngineEvaluate(t *testing.T) {
 				},
 			},
 		}
-		engine, err := Compile(cfg, store)
+		engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
 		if err != nil {
 			t.Fatalf("unexpected compile error: %v", err)
 		}
@@ -286,7 +308,7 @@ func TestEngineCheck(t *testing.T) {
 				},
 			},
 		}
-		engine, err := Compile(cfg, store)
+		engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
 		if err != nil {
 			t.Fatalf("unexpected compile error: %v", err)
 		}
@@ -467,7 +489,7 @@ func TestCompileLocalCacheFixedWindow(t *testing.T) {
 				},
 			},
 		}
-		engine, err := Compile(cfg, store)
+		engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
 		if err != nil {
 			t.Fatalf("unexpected compile error: %v", err)
 		}
@@ -581,7 +603,7 @@ func TestCompileLocalCacheTokenBucket(t *testing.T) {
 				},
 			},
 		}
-		engine, err := Compile(cfg, store)
+		engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
 		if err != nil {
 			t.Fatalf("unexpected compile error: %v", err)
 		}
@@ -679,7 +701,7 @@ func TestEngineFlushLocalCachesSkipsAndPropagatesErrors(t *testing.T) {
 
 	wantErr := errors.New("redis unavailable")
 	store := &fakeStore{syncErr: wantErr}
-	engine, err := Compile(cfg, store)
+	engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
 	if err != nil {
 		t.Fatalf("unexpected compile error: %v", err)
 	}

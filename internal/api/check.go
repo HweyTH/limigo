@@ -17,6 +17,15 @@ type Checker interface {
 	Check(ctx context.Context, key string, headerValue func(string) string) (rules.Decision, error)
 }
 
+// RequestRecorder receives the outcome of every completed check, labeled by
+// rule and a 4-way result: allowed, denied, unmatched, or error. error and
+// denied are recorded separately because they are operationally opposite —
+// error means the backing store failed and requests are being fail-closed,
+// denied means the rate limiter worked as designed.
+type RequestRecorder interface {
+	RecordRequest(rule, result string)
+}
+
 type checkRequest struct {
 	Key string `json:"key"`
 }
@@ -32,7 +41,10 @@ type checkResponse struct {
 }
 
 // NewCheckHandler returns an HTTP handler for POST /v1/check requests.
-func NewCheckHandler(engine Checker) http.Handler {
+// recorder is notified of every completed check's outcome; malformed
+// requests that never reach engine (bad method, bad body, empty key) are not
+// recorded, since they are not rate-limit decisions.
+func NewCheckHandler(engine Checker, recorder RequestRecorder) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -53,6 +65,17 @@ func NewCheckHandler(engine Checker) http.Handler {
 		}
 
 		decision, err := engine.Check(r.Context(), key, r.Header.Get)
+		switch {
+		case err != nil:
+			recorder.RecordRequest(decision.RuleName, "error")
+		case !decision.Matched:
+			recorder.RecordRequest("", "unmatched")
+		case decision.Allowed:
+			recorder.RecordRequest(decision.RuleName, "allowed")
+		default:
+			recorder.RecordRequest(decision.RuleName, "denied")
+		}
+
 		if err != nil {
 			setRetryAfterHeader(w, decision.RetryAfter)
 			writeJSON(w, http.StatusServiceUnavailable, checkResponse{

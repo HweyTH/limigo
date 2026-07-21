@@ -66,3 +66,10 @@ type TokenBucketSyncStore interface {
 	// during the interval since the last sync.
 	SyncTokenBucket(ctx context.Context, key string, delta float64, capacity float64, rate float64) (remaining float64, err error)
 }
+
+// LatencyRecorder receives timing observations for Redis round trips and
+// server-side Lua execution, keyed by the algorithm that produced them.
+type LatencyRecorder interface {
+	ObserveRedisLatency(algorithm string, d time.Duration)
+	ObserveLuaExecution(algorithm string, d time.Duration)
+}

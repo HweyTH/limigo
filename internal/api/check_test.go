@@ -28,6 +28,16 @@ func (c *fakeChecker) Check(ctx context.Context, key string, headerValue func(st
 	return c.decision, c.err
 }
 
+// fakeRequestRecorder is a RequestRecorder double that records every
+// (rule, result) pair passed to RecordRequest, in call order.
+type fakeRequestRecorder struct {
+	calls []struct{ rule, result string }
+}
+
+func (r *fakeRequestRecorder) RecordRequest(rule, result string) {
+	r.calls = append(r.calls, struct{ rule, result string }{rule, result})
+}
+
 func TestNewCheckHandler(t *testing.T) {
 	t.Run("HappyPathAllowedResponse", func(t *testing.T) {
 		checker := &fakeChecker{decision: rules.Decision{Allowed: true, Matched: true, RuleName: "free-tier"}}
@@ -145,6 +155,80 @@ func TestNewCheckHandler(t *testing.T) {
 	})
 }
 
+// TestNewCheckHandlerRecordsRequestOutcome verifies the 4-way result
+// classification: error and denied are operationally opposite (fail-closed
+// vs. working as designed) and must be recorded under distinct labels, as
+// must unmatched (no rule configured for the request) vs. allowed.
+func TestNewCheckHandlerRecordsRequestOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		decision   rules.Decision
+		checkErr   error
+		wantRule   string
+		wantResult string
+	}{
+		{
+			name:       "Allowed",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: "free-tier"},
+			wantRule:   "free-tier",
+			wantResult: "allowed",
+		},
+		{
+			name:       "Denied",
+			decision:   rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier"},
+			wantRule:   "free-tier",
+			wantResult: "denied",
+		},
+		{
+			name:       "Unmatched",
+			decision:   rules.Decision{Allowed: false, Matched: false},
+			wantRule:   "",
+			wantResult: "unmatched",
+		},
+		{
+			name:       "Error",
+			decision:   rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier"},
+			checkErr:   errors.New("redis unavailable"),
+			wantRule:   "free-tier",
+			wantResult: "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := &fakeChecker{decision: tt.decision, err: tt.checkErr}
+			requestRecorder := &fakeRequestRecorder{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(`{"key":"user-123"}`))
+			request.Header.Set("X-Plan", "free")
+			responseRecorder := httptest.NewRecorder()
+
+			NewCheckHandler(checker, requestRecorder).ServeHTTP(responseRecorder, request)
+
+			if len(requestRecorder.calls) != 1 {
+				t.Fatalf("RecordRequest calls = %d, want 1", len(requestRecorder.calls))
+			}
+			got := requestRecorder.calls[0]
+			if got.rule != tt.wantRule || got.result != tt.wantResult {
+				t.Fatalf("RecordRequest(%q, %q), want RecordRequest(%q, %q)", got.rule, got.result, tt.wantRule, tt.wantResult)
+			}
+		})
+	}
+
+	t.Run("MalformedRequestsAreNotRecorded", func(t *testing.T) {
+		checker := &fakeChecker{}
+		requestRecorder := &fakeRequestRecorder{}
+		request := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(`{"key":"   "}`))
+		request.Header.Set("X-Plan", "free")
+		responseRecorder := httptest.NewRecorder()
+
+		NewCheckHandler(checker, requestRecorder).ServeHTTP(responseRecorder, request)
+
+		if len(requestRecorder.calls) != 0 {
+			t.Fatalf("RecordRequest calls = %d, want 0 for a malformed request", len(requestRecorder.calls))
+		}
+	})
+}
+
 func serveCheckRequest(t *testing.T, checker *fakeChecker, method string, body string, plan string) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -152,7 +236,7 @@ func serveCheckRequest(t *testing.T, checker *fakeChecker, method string, body s
 	request.Header.Set("X-Plan", plan)
 	recorder := httptest.NewRecorder()
 
-	NewCheckHandler(checker).ServeHTTP(recorder, request)
+	NewCheckHandler(checker, &fakeRequestRecorder{}).ServeHTTP(recorder, request)
 	return recorder
 }
 
