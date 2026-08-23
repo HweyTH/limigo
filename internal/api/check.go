@@ -87,8 +87,13 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder) http.Handler {
 			return
 		}
 
+		status := http.StatusOK
+		if decision.Matched && !decision.Allowed {
+			status = http.StatusTooManyRequests
+		}
+
 		setRetryAfterHeader(w, decision.RetryAfter)
-		writeJSON(w, http.StatusOK, checkResponse{
+		writeJSON(w, status, checkResponse{
 			Allowed:      decision.Allowed,
 			Matched:      decision.Matched,
 			Rule:         decision.RuleName,

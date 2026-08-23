@@ -61,7 +61,7 @@ func TestNewCheckHandler(t *testing.T) {
 		checker := &fakeChecker{decision: rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier"}}
 		recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "free")
 
-		assertStatus(t, recorder, http.StatusOK)
+		assertStatus(t, recorder, http.StatusTooManyRequests)
 		response := decodeCheckResponse(t, recorder)
 		assertResponse(t, response, checkResponse{Allowed: false, Matched: true, Rule: "free-tier"})
 	})
@@ -84,7 +84,7 @@ func TestNewCheckHandler(t *testing.T) {
 		}}
 		recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "steady")
 
-		assertStatus(t, recorder, http.StatusOK)
+		assertStatus(t, recorder, http.StatusTooManyRequests)
 		response := decodeCheckResponse(t, recorder)
 		assertResponse(t, response, checkResponse{
 			Allowed:      false,
@@ -144,14 +144,27 @@ func TestNewCheckHandler(t *testing.T) {
 
 	t.Run("UnhappyPathStoreErrorFailsClosed", func(t *testing.T) {
 		checker := &fakeChecker{
-			decision: rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier"},
-			err:      errors.New("redis unavailable"),
+			decision: rules.Decision{
+				Allowed:    false,
+				Matched:    true,
+				RuleName:   "free-tier",
+				RetryAfter: 1500 * time.Millisecond,
+			},
+			err: errors.New("redis unavailable"),
 		}
 		recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "free")
 
 		assertStatus(t, recorder, http.StatusServiceUnavailable)
 		response := decodeCheckResponse(t, recorder)
-		assertResponse(t, response, checkResponse{Allowed: false, Matched: true, Rule: "free-tier"})
+		assertResponse(t, response, checkResponse{
+			Allowed:      false,
+			Matched:      true,
+			Rule:         "free-tier",
+			RetryAfterMs: 1500,
+		})
+		if got := recorder.Header().Get("Retry-After"); got != "2" {
+			t.Fatalf("Retry-After header = %q, want 2 (ceil of 1.5s) on a 503", got)
+		}
 	})
 }
 

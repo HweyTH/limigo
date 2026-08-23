@@ -158,6 +158,15 @@ curl -X POST localhost:8080/v1/check \
 {"allowed":true,"matched":true,"rule":"free-tier-fixed-window"}
 ```
 
+Repeat past the rule's limit (100 requests/minute) and the same request returns
+`429 Too Many Requests` instead of `200` (fixed window doesn't compute an exact
+retry time, so no `Retry-After` header is sent here — see the leaky bucket
+section above for a rule that does):
+
+```json
+{"allowed":false,"matched":true,"rule":"free-tier-fixed-window"}
+```
+
 Tear it down with `docker compose down` (add `-v` to also drop Redis's data volume).
 
 ### Option B: Run locally with Go
