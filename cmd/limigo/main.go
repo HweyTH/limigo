@@ -97,6 +97,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/check", api.NewCheckHandler(holder, m))
+	mux.Handle("/healthz", api.NewHealthzHandler())
 
 	server := &http.Server{
 		Addr:    opts.httpAddr,
