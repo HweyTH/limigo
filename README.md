@@ -140,10 +140,22 @@ Once the containers are healthy:
 
 | Service | URL | Notes |
 |---|---|---|
-| Limigo API | http://localhost:8080/v1/check | `POST` requests here |
-| Limigo metrics | http://localhost:9091/metrics | Prometheus exposition format |
-| Prometheus | http://localhost:9090 | scrapes Limigo every 5s |
+| Limigo API | http://localhost:8080/v1/check | `POST` requests here, routed through Traefik to whichever replica picks it up |
+| Prometheus | http://localhost:9090 | discovers and scrapes every Limigo replica every 5s |
 | Grafana | http://localhost:3000 | login `admin` / `admin`; the "Limigo" dashboard is pre-loaded |
+
+Limigo itself binds no fixed host ports — Traefik is the only entry point, so
+the API stays reachable at one address no matter how many replicas are
+running. Scale it up with:
+
+```bash
+docker compose up -d --scale limigo=3
+```
+
+Individual replicas and their `/metrics` endpoints aren't published to the
+host; reach them from inside the compose network (`docker compose exec` into
+another service, or a container on the same network), or read the numbers
+back through Grafana.
 
 Try a request against the bundled `config.example.yaml` rules:
 
