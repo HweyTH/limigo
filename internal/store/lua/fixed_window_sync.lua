@@ -13,9 +13,13 @@
 local delta = tonumber(ARGV[1])
 local window_ms = tonumber(ARGV[2])
 
+local t0 = redis.call('TIME')
+
 if delta <= 0 then
     local current = tonumber(redis.call('GET', KEYS[1])) or 0
-    return current
+    local t1 = redis.call('TIME')
+    local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+    return {current, lua_us}
 end
 
 local count = redis.call('INCRBY', KEYS[1], delta)
@@ -24,4 +28,7 @@ if count == delta then
     redis.call('PEXPIRE', KEYS[1], window_ms)
 end
 
-return count
+local t1 = redis.call('TIME')
+local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+
+return {count, lua_us}

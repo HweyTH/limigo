@@ -14,6 +14,7 @@
 -- ARGV[1] - bucket capacity (maximum number of tokens)
 -- ARGV[2] - refill rate (tokens per second)
 -- ARGV[3] - delta (number of tokens already consumed locally since the last sync)
+local t0 = redis.call('TIME')
 
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
@@ -47,7 +48,10 @@ redis.call('HSET', KEYS[1], 'last_refill_ms', now_ms)
 redis.call('HSET', KEYS[1], 'tokens', token_count)
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
 
+local t1 = redis.call('TIME')
+local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+
 -- Returned as a string: Redis truncates Lua numbers to integers on return,
 -- which would silently drop the fractional part of a partially-refilled or
 -- partially-consumed token count.
-return tostring(token_count)
+return {tostring(token_count), lua_us}

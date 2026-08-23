@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -50,11 +51,12 @@ func (store *RedisStore) AllowFixedWindow(ctx context.Context, key string, limit
 	cmd := store.fixedWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
 	store.recorder.ObserveRedisLatency("fixed_window", time.Since(start))
 
-	res, err := cmd.Int()
+	res, err := cmd.Int64Slice()
 	if err != nil {
 		return false, fmt.Errorf("failed to execute fixed window algorithm: %w", err)
 	}
-	return res == 1, nil
+	store.recorder.ObserveLuaExecution("fixed_window", time.Duration(res[1])*time.Microsecond)
+	return res[0] == 1, nil
 }
 
 // AllowSlidingWindow records the current request for key in a sliding window and
@@ -65,11 +67,12 @@ func (store *RedisStore) AllowSlidingWindow(ctx context.Context, key string, lim
 	cmd := store.slidingWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
 	store.recorder.ObserveRedisLatency("sliding_window", time.Since(start))
 
-	res, err := cmd.Int()
+	res, err := cmd.Int64Slice()
 	if err != nil {
 		return false, fmt.Errorf("failed to execute sliding window algorithm: %w", err)
 	}
-	return res == 1, nil
+	store.recorder.ObserveLuaExecution("sliding_window", time.Duration(res[1])*time.Microsecond)
+	return res[0] == 1, nil
 }
 
 // AllowTokenBucket attempts to consume one token from the bucket for key, refilling
@@ -80,11 +83,12 @@ func (store *RedisStore) AllowTokenBucket(ctx context.Context, key string, capac
 	cmd := store.tokenBucketScript.Run(ctx, store.client, []string{key}, capacity, rate)
 	store.recorder.ObserveRedisLatency("token_bucket", time.Since(start))
 
-	res, err := cmd.Int()
+	res, err := cmd.Int64Slice()
 	if err != nil {
 		return false, fmt.Errorf("failed to execute token bucket algorithm: %w", err)
 	}
-	return res == 1, nil
+	store.recorder.ObserveLuaExecution("token_bucket", time.Duration(res[1])*time.Microsecond)
+	return res[0] == 1, nil
 }
 
 // AllowLeakyBucket admits one request against key's GCRA schedule, returning true
@@ -108,6 +112,7 @@ func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit
 	if err != nil {
 		return false, 0, fmt.Errorf("failed to execute leaky bucket algorithm: %w", err)
 	}
+	store.recorder.ObserveLuaExecution("leaky_bucket", time.Duration(res[2])*time.Microsecond)
 	return res[0] == 1, time.Duration(res[1]) * time.Millisecond, nil
 }
 
@@ -118,11 +123,12 @@ func (store *RedisStore) SyncFixedWindow(ctx context.Context, key string, delta 
 	cmd := store.fixedWindowSyncScript.Run(ctx, store.client, []string{key}, delta, window.Milliseconds())
 	store.recorder.ObserveRedisLatency("fixed_window_sync", time.Since(start))
 
-	total, err := cmd.Int64()
+	res, err := cmd.Int64Slice()
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute fixed window sync: %w", err)
 	}
-	return total, nil
+	store.recorder.ObserveLuaExecution("fixed_window_sync", time.Duration(res[1])*time.Microsecond)
+	return res[0], nil
 }
 
 // SyncTokenBucket refills the bucket for key based on elapsed time, then subtracts
@@ -134,9 +140,22 @@ func (store *RedisStore) SyncTokenBucket(ctx context.Context, key string, delta 
 	cmd := store.tokenBucketSyncScript.Run(ctx, store.client, []string{key}, capacity, rate, delta)
 	store.recorder.ObserveRedisLatency("token_bucket_sync", time.Since(start))
 
-	remaining, err := cmd.Float64()
+	res, err := cmd.Slice()
 	if err != nil {
 		return 0, fmt.Errorf("failed to execute token bucket sync: %w", err)
 	}
+	tokenStr, ok := res[0].(string)
+	if !ok {
+		return 0, fmt.Errorf("failed to execute token bucket sync: unexpected token count type %T", res[0])
+	}
+	remaining, err := strconv.ParseFloat(tokenStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute token bucket sync: parse token count: %w", err)
+	}
+	luaUs, ok := res[1].(int64)
+	if !ok {
+		return 0, fmt.Errorf("failed to execute token bucket sync: unexpected lua_us type %T", res[1])
+	}
+	store.recorder.ObserveLuaExecution("token_bucket_sync", time.Duration(luaUs)*time.Microsecond)
 	return remaining, nil
 }

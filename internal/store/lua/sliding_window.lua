@@ -7,6 +7,7 @@
 -- KEYS[1] - rate limit key (sorted set)
 -- ARGV[1] - maximum number of requests allowed per window
 -- ARGV[2] - window duration in milliseconds
+local t0 = redis.call('TIME')
 
 local time = redis.call('TIME')
 
@@ -18,12 +19,16 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start)
 
 local num_requests = redis.call('ZCARD', KEYS[1])
 
+local allowed = 0
+
 if num_requests < tonumber(ARGV[1]) then
     local member = tostring(time[1]) .. ':' .. tostring(time[2])
     redis.call('ZADD', KEYS[1], now_ms, member)
     redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
-
-    return 1
-else
-    return 0
+    allowed = 1
 end
+
+local t1 = redis.call('TIME')
+local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+
+return {allowed, lua_us}

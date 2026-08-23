@@ -28,6 +28,7 @@ type options struct {
 	configPath         string
 	redisAddr          string
 	httpAddr           string
+	metricsAddr        string
 	shutdownTimeout    time.Duration
 	cacheFlushInterval time.Duration
 }
@@ -102,6 +103,16 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		Handler: mux,
 	}
 
+	var metricsServer *http.Server
+	if opts.metricsAddr != "" {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", m.Handler())
+		metricsServer = &http.Server{
+			Addr:    opts.metricsAddr,
+			Handler: metricsMux,
+		}
+	}
+
 	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr, opts.httpAddr); err != nil {
 		return fmt.Errorf("write startup summary: %w", err)
 	}
@@ -113,15 +124,18 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		onChange := func() {
 			newCfg, err := config.Load(opts.configPath)
 			if err != nil {
+				m.IncConfigReload(false)
 				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
 				return
 			}
 			if err := config.Validate(newCfg); err != nil {
+				m.IncConfigReload(false)
 				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
 				return
 			}
 			newEngine, err := rules.Compile(newCfg, redisStore, m)
 			if err != nil {
+				m.IncConfigReload(false)
 				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
 				return
 			}
@@ -132,6 +146,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 				fmt.Fprintf(stderr, "limigo: flush local caches before reload failed: %v\n", err)
 			}
 			holder.Store(newEngine)
+			m.IncConfigReload(true)
 			fmt.Fprintf(stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), opts.configPath)
 		}
 		if err := config.Watch(ctx, opts.configPath, onChange); err != nil {
@@ -159,10 +174,23 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		serveErr <- server.ListenAndServe()
 	}()
 
+	var metricsErr chan error
+	if metricsServer != nil {
+		metricsErr = make(chan error, 1)
+		go func() {
+			metricsErr <- metricsServer.ListenAndServe()
+		}()
+	}
+
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve HTTP on %q: %w", opts.httpAddr, err)
+		}
+		return nil
+	case err := <-metricsErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve metrics on %q: %w", opts.metricsAddr, err)
 		}
 		return nil
 	case <-ctx.Done():
@@ -177,6 +205,15 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 				return fmt.Errorf("graceful shutdown timed out after %s: %w", opts.shutdownTimeout, err)
 			}
 			return fmt.Errorf("shutdown HTTP server: %w", err)
+		}
+
+		if metricsServer != nil {
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					return fmt.Errorf("graceful shutdown of metrics server timed out after %s: %w", opts.shutdownTimeout, err)
+				}
+				return fmt.Errorf("shutdown metrics server: %w", err)
+			}
 		}
 
 		if err := holder.FlushLocalCaches(shutdownCtx); err != nil {
@@ -204,6 +241,12 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 		"http-addr",
 		envOrDefault(getenv, "LIMIGO_HTTP_ADDR", ":8080"),
 		"HTTP listen address",
+	)
+	flags.StringVar(
+		&opts.metricsAddr,
+		"metrics-addr",
+		envOrDefault(getenv, "LIMIGO_METRICS_ADDR", ":9091"),
+		"metrics listen address (prometheus /metrics); empty disables the listener",
 	)
 
 	if err := flags.Parse(args); err != nil {

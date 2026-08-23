@@ -7,14 +7,17 @@
 -- Denied requests do not advance the schedule, so a rejected burst does not
 -- push future requests further out than the configured rate allows.
 --
--- Returns a two-element array {allowed, retry_after_ms}. retry_after_ms is 0
--- when allowed, or the exact number of milliseconds (rounded up) until this
+-- Returns a three-element array {allowed, retry_after_ms, lua_us}. retry_after_ms
+-- is 0 when allowed, or the exact number of milliseconds (rounded up) until this
 -- key's schedule will next admit a request when denied — GCRA already knows
--- this precisely, so callers get an exact backoff instead of guessing.
+-- this precisely, so callers get an exact backoff instead of guessing. lua_us is
+-- the script's own execution time in microseconds, sampled via redis.call('TIME').
 --
 -- KEYS[1] - rate limit key (string holding the TAT in fractional milliseconds)
 -- ARGV[1] - emission interval in milliseconds (window / limit)
 -- ARGV[2] - tolerance in milliseconds (emission_interval * (burst - 1))
+
+local t0 = redis.call('TIME')
 
 local emission_interval_ms = tonumber(ARGV[1])
 local tolerance_ms = tonumber(ARGV[2])
@@ -41,7 +44,11 @@ if now_ms >= allow_at then
     local new_tat = tat + emission_interval_ms
     local ttl_ms = math.max(math.ceil(new_tat - now_ms), 1)
     redis.call('SET', KEYS[1], tostring(new_tat), 'PX', ttl_ms)
-    return {1, 0}
+    local t1 = redis.call('TIME')
+    local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+    return {1, 0, lua_us}
 end
 
-return {0, math.ceil(allow_at - now_ms)}
+local t1 = redis.call('TIME')
+local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+return {0, math.ceil(allow_at - now_ms), lua_us}

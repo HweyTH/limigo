@@ -7,6 +7,7 @@
 -- KEYS[1] - rate limit key (hash with fields: tokens, last_refill_ms)
 -- ARGV[1] - bucket capacity (maximum number of tokens)
 -- ARGV[2] - refill rate (tokens per second)
+local t0 = redis.call('TIME')
 
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
@@ -47,4 +48,7 @@ end
 
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
 
-return allowed
+local t1 = redis.call('TIME')
+local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+
+return {allowed, lua_us}
