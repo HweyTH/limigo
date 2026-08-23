@@ -41,6 +41,13 @@ services:
       REDIS_ADDR: redis:6379
       LIMIGO_HTTP_ADDR: ":8080"
       LIMIGO_METRICS_ADDR: ":9091"
+      # Unset (default) resolves to an empty string, which main.go's
+      # envOrDefault treats as blank and falls back to its own 10ms default —
+      # so this is a no-op for every caller except bench/run-flush-sweep.sh
+      # (ticket 09), which exports this in its own shell before `docker
+      # compose up` to sweep the accuracy/latency knob (CONTEXT.md: flush
+      # interval).
+      LIMIGO_CACHE_FLUSH_INTERVAL: ${LIMIGO_CACHE_FLUSH_INTERVAL:-}
     healthcheck:
       test: ["CMD", "./healthcheck"]
       interval: 5s
