@@ -123,3 +123,77 @@ sequenceDiagram
 **This makes `local_cache` a fairness/throughput knob, not a security boundary.** It is a good fit for a free-tier or cost-control limit, where a brief, bounded overshoot is an acceptable trade for reduced Redis load. It is **not** recommended for a rule that functions as an abuse or security boundary (e.g. login attempts, payment endpoints) — those should stay on the default synchronous path, where every decision is exact.
 
 **Interaction with config hot-reload:** Limigo watches its config file and rebuilds the rule engine on every change, without a restart. Because each rebuilt engine has its own local caches, a naive reload would discard any not-yet-flushed local admits when the old engine is replaced. Limigo flushes the outgoing engine's local caches to Redis immediately before swapping in the new one, so a reload never silently drops pending admits — the only remaining accuracy window is the same bounded, self-correcting one described above.
+
+## Installation
+
+### Option A: Docker Compose (fastest way to see it working)
+
+This brings up the full stack — Limigo, Redis, Prometheus, and Grafana, wired together and pre-provisioned — in one command. Requires only [Docker](https://docs.docker.com/get-docker/) with Compose v2.
+
+```bash
+git clone https://github.com/HweyTH/limigo.git
+cd limigo
+docker compose up -d --build
+```
+
+Once the containers are healthy:
+
+| Service | URL | Notes |
+|---|---|---|
+| Limigo API | http://localhost:8080/v1/check | `POST` requests here |
+| Limigo metrics | http://localhost:9091/metrics | Prometheus exposition format |
+| Prometheus | http://localhost:9090 | scrapes Limigo every 5s |
+| Grafana | http://localhost:3000 | login `admin` / `admin`; the "Limigo" dashboard is pre-loaded |
+
+Try a request against the bundled `config.example.yaml` rules:
+
+```bash
+curl -X POST localhost:8080/v1/check \
+  -H "X-Plan: free" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"user-123"}'
+```
+
+```json
+{"allowed":true,"matched":true,"rule":"free-tier-fixed-window"}
+```
+
+Tear it down with `docker compose down` (add `-v` to also drop Redis's data volume).
+
+### Option B: Run locally with Go
+
+Requires Go 1.25+ and a running Redis instance.
+
+```bash
+# 1. Start Redis (skip if you already have one)
+docker run -d --name limigo-redis -p 6379:6379 redis:7-alpine
+
+# 2. Clone and build
+git clone https://github.com/HweyTH/limigo.git
+cd limigo
+go build -o limigo ./cmd/limigo
+
+# 3. Run against the example rules
+./limigo -config config.example.yaml -redis-addr localhost:6379
+```
+
+The server listens on `:8080` (API) and `:9091` (Prometheus metrics) by default. Both are configurable via flags or environment variables:
+
+| Flag | Env var | Default | Purpose |
+|---|---|---|---|
+| `-config` | `LIMIGO_CONFIG` | `config.example.yaml` | path to the rules YAML file |
+| `-redis-addr` | `REDIS_ADDR` | `localhost:6379` | Redis server address |
+| `-http-addr` | `LIMIGO_HTTP_ADDR` | `:8080` | API listen address |
+| `-metrics-addr` | `LIMIGO_METRICS_ADDR` | `:9091` | Prometheus `/metrics` listen address; set empty to disable |
+| `-shutdown-timeout` | `LIMIGO_SHUTDOWN_TIMEOUT` | `10s` | max time to drain in-flight requests on `SIGTERM` |
+| `-cache-flush-interval` | `LIMIGO_CACHE_FLUSH_INTERVAL` | `10ms` | how often `local_cache: true` rules sync to Redis |
+
+Write your own rules by copying `config.example.yaml` — see the [Rule configuration](#node-local-caching-local_cache) examples above for the YAML shape per algorithm. Limigo hot-reloads the file on save, so rule changes take effect without a restart.
+
+### Running the tests
+
+```bash
+go test ./...
+```
+
+The `internal/store` package spins up a real Redis via [testcontainers](https://golang.testcontainers.org/), so Docker must be running locally for the full suite to pass.
