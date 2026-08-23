@@ -1,0 +1,22 @@
+# Load-test rule config for tickets 07/08 (throughput + overshoot harnesses).
+# Not used by the control runs in this ticket, which hit /healthz and never
+# touch rule logic at all — this file exists so those later runs have
+# somewhere to point --config.
+#
+# The limit here is set far above any offered load the generator can produce
+# on this hardware. Without that headroom, a high-rate attack against a
+# normal rule (e.g. config.example.yaml's 100-per-60s free tier) denies
+# almost every request within the first millisecond, and a denial is the
+# cheap path (CONTEXT.md: allow path vs denial path). Publishing that number
+# as "throughput" would measure how fast Limigo can say no, not how fast it
+# can do the work a real allowed request costs: a counter mutation and, for
+# uncached rules, a Lua round-trip to Redis.
+rules:
+  - name: load-test-token-bucket
+    match:
+      header: X-Plan
+      value: loadtest
+    algorithm: token_bucket
+    token_bucket:
+      capacity: 100000000
+      rate: 10000000

@@ -27,6 +27,10 @@ go.work.sum
 # env file
 .env
 
+# Raw vegeta attack output (regenerate with bench/run.sh; summaries are
+# committed under bench/results/, the binaries backing them are not)
+bench/results/raw/
+
 # Editor/IDE
 # .idea/
 # .vscode/
