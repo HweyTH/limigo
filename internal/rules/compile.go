@@ -196,7 +196,11 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 			var errs error
 			for key, bw := range manager.Snapshot() {
 				delta := bw.PendingDelta()
-				if delta == 0 {
+				// An exhausted window is re-synced even with nothing to write:
+				// it admits nothing, so it would never accrue a delta, and the
+				// baseline that is denying its requests is only refreshed by a
+				// flush. Skipping it here would wedge it permanently.
+				if delta == 0 && !bw.Exhausted() {
 					continue
 				}
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
@@ -233,7 +237,11 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 			for key, tb := range snapshot {
 				sum += tb.FillRatio()
 				delta := tb.PendingDelta()
-				if delta == 0 {
+				// An exhausted bucket is re-synced even with nothing to write:
+				// it admits nothing, so it would never accrue a delta, and the
+				// baseline that is denying its requests is only refreshed by a
+				// flush. Skipping it here would wedge it permanently.
+				if delta == 0 && !tb.Exhausted() {
 					continue
 				}
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)

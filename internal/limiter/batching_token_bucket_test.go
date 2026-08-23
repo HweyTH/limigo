@@ -160,3 +160,71 @@ func TestBatchingTokenBucketConcurrency(t *testing.T) {
 		t.Fatalf("allowedCount = %d, want exactly %d", allowedCount.Load(), int64(capacity))
 	}
 }
+
+// TestBatchingTokenBucketExhausted verifies Exhausted tracks whether Allow can
+// currently admit, including after a flush leaves the baseline negative — the
+// state a caller's flush cycle must keep reconciling to avoid wedging the
+// bucket permanently.
+func TestBatchingTokenBucketExhausted(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		// setup drives the bucket into the state under test.
+		setup func(tb *BatchingTokenBucket)
+		want  bool
+	}{
+		{
+			name:  "FreshBucketIsNotExhausted",
+			setup: func(*BatchingTokenBucket) {},
+			want:  false,
+		},
+		{
+			name: "PartiallyConsumedIsNotExhausted",
+			setup: func(tb *BatchingTokenBucket) {
+				_, _ = tb.Allow(ctx, "key")
+			},
+			want: false,
+		},
+		{
+			name: "FullyConsumedIsExhausted",
+			setup: func(tb *BatchingTokenBucket) {
+				for range 2 {
+					_, _ = tb.Allow(ctx, "key")
+				}
+			},
+			want: true,
+		},
+		{
+			name: "NegativeBaselineAfterFlushIsExhausted",
+			setup: func(tb *BatchingTokenBucket) {
+				for range 2 {
+					_, _ = tb.Allow(ctx, "key")
+				}
+				tb.ApplyRemoteTotal(2, -5)
+			},
+			want: true,
+		},
+		{
+			name: "RefilledBaselineAfterFlushIsNotExhausted",
+			setup: func(tb *BatchingTokenBucket) {
+				for range 2 {
+					_, _ = tb.Allow(ctx, "key")
+				}
+				tb.ApplyRemoteTotal(2, -5)
+				tb.ApplyRemoteTotal(0, 2)
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := NewBatchingTokenBucket(2, 1)
+			tt.setup(tb)
+			if got := tb.Exhausted(); got != tt.want {
+				t.Fatalf("Exhausted() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -581,6 +581,42 @@ func TestCompileLocalCacheFixedWindow(t *testing.T) {
 			t.Fatalf("syncCalls = %d, want 0 when no keys have pending admits", store.syncCalls)
 		}
 	})
+
+	// A window that has reached its limit admits nothing, so it has no pending
+	// delta to flush. If that alone suppressed its flush, the node would never
+	// observe the window rolling over and would stay wedged permanently.
+	t.Run("RecoversAfterWindowRollsWithNoPendingDelta", func(t *testing.T) {
+		store := &fakeStore{syncTotal: 3}
+		engine := newEngine(t, store, 3)
+
+		check(t, engine, "client-1")
+		check(t, engine, "client-1")
+		check(t, engine, "client-1")
+
+		if err := engine.FlushLocalCaches(context.Background()); err != nil {
+			t.Fatalf("unexpected flush error: %v", err)
+		}
+		if check(t, engine, "client-1").Allowed {
+			t.Fatal("expected denial once the reconciled baseline reached the limit")
+		}
+
+		// The window has rolled over in the store; the node has admitted
+		// nothing since its last flush, so it carries no delta.
+		callsBefore := store.syncCalls
+		store.syncTotal = 0
+
+		if err := engine.FlushLocalCaches(context.Background()); err != nil {
+			t.Fatalf("unexpected flush error: %v", err)
+		}
+
+		if store.syncCalls == callsBefore {
+			t.Fatal("expected a limit-reached window to be re-synced even with a zero pending delta; " +
+				"skipping the sync leaves it unable to ever observe the window rolling over")
+		}
+		if !check(t, engine, "client-1").Allowed {
+			t.Fatal("expected the window to admit again once the store reported a reset count")
+		}
+	})
 }
 
 // TestCompileLocalCacheTokenBucket verifies that token bucket rules with
@@ -665,6 +701,45 @@ func TestCompileLocalCacheTokenBucket(t *testing.T) {
 		// next request must be denied locally until a later flush restores headroom.
 		if check(t, engine, "client-1").Allowed {
 			t.Fatal("expected request to be denied while reconciled remaining tokens are negative")
+		}
+	})
+
+	// A bucket that has exhausted its local baseline admits nothing, so it has
+	// no pending delta to flush. If that alone suppressed its flush, it would
+	// never observe the store refilling and would stay wedged permanently —
+	// admitting zero for the rest of the process's life, no matter how much
+	// headroom the store had. Recovery therefore has to be driven by a flush
+	// that happens even when the delta is zero.
+	t.Run("RecoversAfterStoreRefillsWithNoPendingDelta", func(t *testing.T) {
+		store := &fakeStore{syncRemaining: -1}
+		engine := newEngine(t, store, 3)
+
+		check(t, engine, "client-1")
+		check(t, engine, "client-1")
+		check(t, engine, "client-1")
+
+		if err := engine.FlushLocalCaches(context.Background()); err != nil {
+			t.Fatalf("unexpected flush error: %v", err)
+		}
+		if check(t, engine, "client-1").Allowed {
+			t.Fatal("expected denial while the baseline is negative")
+		}
+
+		// The bucket is starved: no admits since the last flush, so no delta.
+		// The store has meanwhile refilled to full capacity.
+		callsBefore := store.syncCalls
+		store.syncRemaining = 3
+
+		if err := engine.FlushLocalCaches(context.Background()); err != nil {
+			t.Fatalf("unexpected flush error: %v", err)
+		}
+
+		if store.syncCalls == callsBefore {
+			t.Fatal("expected a starved bucket to be re-synced even with a zero pending delta; " +
+				"skipping the sync leaves it unable to ever observe a refill")
+		}
+		if !check(t, engine, "client-1").Allowed {
+			t.Fatal("expected the bucket to admit again once the store reported headroom")
 		}
 	})
 }

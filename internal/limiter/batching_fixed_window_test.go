@@ -131,3 +131,67 @@ func TestBatchingFixedWindowConcurrency(t *testing.T) {
 		t.Fatalf("allowedCount = %d, want exactly %d", allowedCount.Load(), limit)
 	}
 }
+
+// TestBatchingFixedWindowExhausted verifies Exhausted tracks whether Allow can
+// currently admit, including after a flush reconciles the baseline to the
+// limit — the state a caller's flush cycle must keep reconciling to avoid
+// wedging the window permanently.
+func TestBatchingFixedWindowExhausted(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		// setup drives the window into the state under test.
+		setup func(bw *BatchingFixedWindow)
+		want  bool
+	}{
+		{
+			name:  "FreshWindowIsNotExhausted",
+			setup: func(*BatchingFixedWindow) {},
+			want:  false,
+		},
+		{
+			name: "PartiallyConsumedIsNotExhausted",
+			setup: func(bw *BatchingFixedWindow) {
+				_, _ = bw.Allow(ctx, "key")
+			},
+			want: false,
+		},
+		{
+			name: "AtLimitIsExhausted",
+			setup: func(bw *BatchingFixedWindow) {
+				for range 2 {
+					_, _ = bw.Allow(ctx, "key")
+				}
+			},
+			want: true,
+		},
+		{
+			name: "BaselineAtLimitAfterFlushIsExhausted",
+			setup: func(bw *BatchingFixedWindow) {
+				_, _ = bw.Allow(ctx, "key")
+				bw.ApplyRemoteTotal(1, 2)
+			},
+			want: true,
+		},
+		{
+			name: "RolledWindowAfterFlushIsNotExhausted",
+			setup: func(bw *BatchingFixedWindow) {
+				_, _ = bw.Allow(ctx, "key")
+				bw.ApplyRemoteTotal(1, 2)
+				bw.ApplyRemoteTotal(0, 0)
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bw := NewBatchingFixedWindow(2)
+			tt.setup(bw)
+			if got := bw.Exhausted(); got != tt.want {
+				t.Fatalf("Exhausted() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

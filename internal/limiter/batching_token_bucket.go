@@ -50,6 +50,21 @@ func (b *BatchingTokenBucket) PendingDelta() float64 {
 	return b.pendingDelta
 }
 
+// Exhausted reports whether the local baseline currently has no token to give,
+// so Allow is denying every request.
+//
+// A caller's flush cycle must reconcile an exhausted bucket even when it has
+// no pending delta to write. An exhausted bucket admits nothing, so it accrues
+// no delta, so a flush cycle that skipped zero-delta buckets would never call
+// the backing store for it again — and the baseline is only ever refreshed by
+// a flush. It would deny every request for the remaining life of the process,
+// however much headroom the store had refilled in the meantime.
+func (b *BatchingTokenBucket) Exhausted() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.remoteTokens-b.pendingDelta < 1
+}
+
 // FillRatio returns the bucket's local view of how full it is, as a value
 // clamped to [0,1]: (remoteTokens - pendingDelta) / capacity. A non-positive
 // capacity returns 0 rather than dividing by zero.

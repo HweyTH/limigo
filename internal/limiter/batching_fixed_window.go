@@ -47,6 +47,21 @@ func (b *BatchingFixedWindow) PendingDelta() int64 {
 	return b.pendingDelta
 }
 
+// Exhausted reports whether the local baseline has reached the limit, so Allow
+// is denying every request.
+//
+// A caller's flush cycle must reconcile an exhausted window even when it has
+// no pending delta to write. An exhausted window admits nothing, so it accrues
+// no delta, so a flush cycle that skipped zero-delta windows would never call
+// the backing store for it again — and the baseline is only ever refreshed by
+// a flush. It would deny every request for the remaining life of the process,
+// long after the window had rolled over in the store.
+func (b *BatchingFixedWindow) Exhausted() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.remoteTotal+b.pendingDelta >= b.limit
+}
+
 // ApplyRemoteTotal reconciles a successful flush. flushed is the delta value
 // that was just synced to the backing store (the value PendingDelta returned
 // before the flush began), and total is the authoritative count the backing
