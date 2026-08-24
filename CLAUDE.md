@@ -167,7 +167,9 @@ limigo/
 - Algorithm comparison table with trade-offs
 - Architecture diagram
 - Quickstart (Docker Compose up in one command)
-- Load test results: target 50k req/s across 3 nodes, p99 < 5ms
+- Load test results: measured numbers only, each with hardware and a reproduction
+  command — no target figure is asserted here; see the README's `## Benchmarks`
+  section and `docs/adr/0002-publish-measured-numbers-retire-the-50k-target.md`
 - Design decisions section (Lua atomicity, local cache batching)
 
 ---
