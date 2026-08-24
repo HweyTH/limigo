@@ -1,0 +1,13 @@
+# Compose override for bench/run-throughput.sh (ticket 07). Points the limigo
+# service at bench/config.loadtest.yaml instead of the baked-in
+# config.example.yaml, so the algorithm-axis and node-axis runs hit rules with
+# headroom limits (allow path hot) or the deliberate deny rule, per that file's
+# own header comment.
+#
+# Applied with: docker compose -f docker-compose.yml -f bench/docker-compose.bench.yml ...
+services:
+  limigo:
+    volumes:
+      - ./bench/config.loadtest.yaml:/app/config.loadtest.yaml:ro
+    environment:
+      LIMIGO_CONFIG: /app/config.loadtest.yaml
