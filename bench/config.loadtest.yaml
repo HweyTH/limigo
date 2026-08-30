@@ -17,9 +17,8 @@
 # allow-path rows above.
 #
 # None of these rules set local_cache — the cached-vs-uncached comparison uses
-# the existing burst-tier/cached-tier pair in config.example.yaml instead (see
-# docs/plans/benchmark-load-test.md, "Repo facts"). Constructing a second pair
-# here would just be a second, redundant A/B.
+# the existing burst-tier/cached-tier pair in config.example.yaml instead.
+# Constructing a second pair here would just be a second, redundant A/B.
 rules:
   - name: load-test-fixed-window
     match:
