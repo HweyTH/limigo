@@ -1,10 +1,104 @@
 # Limigo
 
-Limigo v0.1: Redis-backed distributed and hot-reloadable rate limiter in Go with configurable rules, fixed/sliding/token-bucket/leaky-bucket algorithms, Lua atomic operations, HTTP check endpoint, Docker Compose quickstart, tests, and basic Prometheus metrics.
+[![CI](https://github.com/HweyTH/limigo/actions/workflows/ci.yml/badge.svg)](https://github.com/HweyTH/limigo/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
+[![Lua](https://img.shields.io/badge/Lua-atomic%20scripts-2C2D72?logo=lua&logoColor=white)](https://www.lua.org)
+[![Traefik](https://img.shields.io/badge/Traefik-v3-24A1C1?logo=traefikproxy&logoColor=white)](https://traefik.io)
+[![Prometheus](https://img.shields.io/badge/Prometheus-metrics-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io)
+[![Grafana](https://img.shields.io/badge/Grafana-dashboard-F46800?logo=grafana&logoColor=white)](https://grafana.com)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+A distributed rate limiter in Go. Counter state is shared across nodes in Redis
+and every decision runs as an atomic Lua script, so adding nodes never
+double-spends a client's quota. Four algorithms, hot-reloadable rules, and a
+published measurement of exactly what the accuracy/latency trade-off costs.
+
+## Why distributed rate limiting is hard
+
+On one machine, a rate limiter is a counter behind a mutex. All of the difficulty
+arrives the moment "one machine" stops being true.
+
+**Race conditions.** The obvious implementation — read the counter, compare it to
+the limit, write it back — is a read-modify-write with a gap in the middle. Two
+nodes serving the same client can both read `99`, both conclude the request is
+under a limit of 100, and both write `100`. The limit is breached and no node did
+anything wrong. Limigo never issues a `GET` followed by a `SET`: each algorithm's
+entire decision lives in a Lua script under
+[`internal/store/lua/`](internal/store/lua/), which Redis executes atomically as a
+single unit. Concurrent nodes serialise on the server, so the check and the
+increment cannot be interleaved.
+
+**Clock skew.** Anything time-based — a window boundary, a bucket refill, a GCRA
+schedule — needs a clock, and separate machines do not agree on what time it is.
+A node whose clock runs a second fast expands its own window and admits traffic
+its peers would deny. Limigo's scripts never accept a timestamp from the caller;
+they call `redis.call('TIME')` and read the clock of the one machine every node
+already shares. There is exactly one clock in the system, so there is no skew to
+reconcile.
+
+**Redis failover.** The shared state is also a shared dependency. When Redis is
+unreachable, a rate limiter has to choose: admit traffic it can no longer meter,
+or deny traffic it can no longer justify denying. Limigo currently **fails
+closed** — `/v1/check` returns `503` with `allowed: false`, and the error is
+counted separately from a genuine denial so the two are never confused on a
+dashboard. That protects the quota at the cost of availability, which is the
+less common choice and the right one only for some deployments. It is deliberate
+but not yet defended in writing or measured under a real outage; that work is
+tracked in [#4](https://github.com/HweyTH/limigo/issues/4).
+
+## Architecture
+
+Limigo nodes are stateless and interchangeable. All shared counter state lives in
+Redis, so a node holds nothing that matters if it dies — which is what makes
+`docker compose up --scale limigo=3` a meaningful thing to do rather than three
+independent limiters disagreeing with each other.
+
+```mermaid
+flowchart TB
+    C["API clients"]
+    T["Traefik — single entry point, :8080"]
+    N1["Limigo node 1"]
+    N2["Limigo node 2"]
+    N3["Limigo node N"]
+    R[("Redis — authoritative counter state")]
+    P["Prometheus"]
+    G["Grafana"]
+
+    C -->|"POST /v1/check"| T
+    T --> N1
+    T --> N2
+    T --> N3
+    N1 -->|"EVALSHA, one key per script"| R
+    N2 -->|"EVALSHA, one key per script"| R
+    N3 -->|"EVALSHA, one key per script"| R
+    P -.->|"scrapes every replica"| N1
+    P -.-> N2
+    P -.-> N3
+    P --> G
+```
+
+Rules are matched in configuration order, first match wins, and the whole rule
+set is recompiled and swapped atomically when the config file changes on disk —
+no restart, no dropped requests.
 
 ## Rate limiting algorithms
 
 Limigo supports four rate limiting algorithms behind a common interface. They solve the same problem, but with different trade-offs around fairness, burst handling, memory usage, and implementation cost.
+
+| Algorithm | Accuracy | Burst behaviour | State per key | `local_cache` | Exact `Retry-After` |
+|---|---|---|---|---|---|
+| **Fixed window counter** | Approximate — boundary bursts | Up to 2× the limit across a window edge | One integer | Supported | No |
+| **Sliding window log** | Exact over the rolling window | None | One timestamp per request in the window | Rejected at config validation | No |
+| **Token bucket** | Exact average rate | Up to the bucket's capacity | Two fields: tokens, last refill | Supported | No |
+| **Leaky bucket (GCRA)** | Exact schedule | Configurable tolerance via `burst` | One timestamp (the TAT) | Rejected at config validation | Yes — millisecond precision |
+
+The last two columns are facts about *this* implementation rather than about the
+algorithms in general, and both are enforced in code: `local_cache` is rejected
+at config-validation time for the two algorithms whose guarantees it would
+undermine, and only GCRA can compute the exact moment a denied client becomes
+admissible. Both are explained below.
 
 ### 1. Fixed window counter
 
@@ -116,7 +210,7 @@ sequenceDiagram
     Note over N: local baseline recalibrated
 ```
 
-**Why only `fixed_window` and `token_bucket` support this, and `sliding_window` deliberately does not:** sliding window's entire value proposition, documented above, is exact rolling-window accuracy with no boundary bursts. Batching it would mean trading away the one thing it exists to guarantee, for a latency win nobody asked that specific algorithm to make. `fixed_window` and `token_bucket` are both just counters/bucket state, which batch cleanly as a delta; sliding window would require batching sets of individual timestamps, which is both architecturally messier and directly undermines its documented purpose. `local_cache: true` is rejected at config-validation time for `sliding_window` rules.
+**Why only `fixed_window` and `token_bucket` support this, and `sliding_window` deliberately does not:** sliding window's entire value proposition, documented above, is exact rolling-window accuracy with no boundary bursts. Batching it would mean trading away the one thing it exists to guarantee, for a latency win nobody asked that specific algorithm to make. `fixed_window` and `token_bucket` are both just counters/bucket state, which batch cleanly as a delta; sliding window would require batching sets of individual timestamps, which is both architecturally messier and directly undermines its documented purpose. `local_cache: true` is rejected at config-validation time for both `sliding_window` and `leaky_bucket` rules — for `leaky_bucket`, because local burst absorption is precisely what a smoothing algorithm exists to prevent.
 
 **The accuracy trade-off, quantified:** during the interval between flushes, each node's admit decisions are based on the last value it heard from Redis, not the fleet-wide truth at that instant. The maximum possible over-admission in any single flush interval is bounded by `(number of nodes) × (max requests one node can locally admit within that interval)` — a small, quantifiable slip, not an unbounded bypass. Crucially, it does not accumulate: every flush interval reconciles back to the true total, so the next interval starts from a corrected baseline rather than compounding drift.
 
@@ -525,3 +619,13 @@ go test ./...
 ```
 
 The `internal/store` package spins up a real Redis via [testcontainers](https://golang.testcontainers.org/), so Docker must be running locally for the full suite to pass.
+
+Pass `-short` to skip it and run everything else without Docker:
+
+```bash
+go test -short ./...
+```
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
