@@ -108,11 +108,9 @@ Real-life example: a free API plan allows 100 requests per minute. If a user sen
 
 ```mermaid
 timeline
-    title Fixed window boundary burst
-    12:00:00 : Window A starts
-    12:00:59 : 100 requests allowed
-    12:01:00 : Window B starts and counter resets
-    12:01:00 : 100 more requests allowed
+    title Fixed window boundary burst (limit 100 req/min)
+    Window A : opens 12:00:00 : 100 requests allowed by 12:00:59
+    Window B : opens 12:01:00, counter resets : 100 more requests allowed at 12:01:00
 ```
 
 Where it fails: imagine this limit protects a checkout or payment API. A client can spend its full minute quota just before the reset, then immediately spend the next minute's quota right after the reset. Redis sees both batches as valid because the counter changed windows, but the payment service still receives 200 near-simultaneous requests. That can exhaust worker pools, trigger database lock contention, slow down unrelated customers, or make retries pile up even though the client technically stayed under 100 requests in each fixed minute.
