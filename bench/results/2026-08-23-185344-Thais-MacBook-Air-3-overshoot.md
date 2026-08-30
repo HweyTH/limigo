@@ -56,7 +56,7 @@ escalation check below is for — read it before treating this table as the
 
 local_cache: true: unbounded-looking under-admission (fewer requests admitted than the expected ceiling) at 3 nodes — |overshoot| is 19.57% of the configured limit
 
-Per ticket 08, this blocks recommending local caching as a default until
+This blocks recommending local caching as a default until
 investigated — it is a design finding, not a number to publish quietly.
 
 Raw vegeta output and generated target files are kept under

@@ -164,8 +164,8 @@ the allow path stays hot for both arms instead of collapsing into the denial
 path once the 1000-token burst capacity drains. At this rate the comparison is
 latency (does the local cache avoid a Redis round-trip), not max throughput —
 measuring throughput at these low, realistic limits would mostly measure how
-fast Limigo can say no once capacity is exhausted, which is ticket 08's
-overshoot harness, not this one's.
+fast Limigo can say no once capacity is exhausted, which is what
+bench/run-overshoot.sh measures, not this harness.
 
 Both arms are open-model — fixed arrival rate, uncapped worker pool — so these
 percentiles carry the same coordinated-omission guarantee as the latency tables

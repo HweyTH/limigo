@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# bench/run-throughput.sh — throughput/latency measurement suite (ticket 07).
+# bench/run-throughput.sh — throughput/latency measurement suite.
 #
 # Produces the algorithm comparison table and the scaling curve, both opening
-# with a fresh set of the three control rows from ticket 06 (ADR-0004) so every
+# with a fresh set of the three control rows (ADR-0004) so every
 # limiter number in this file can be read as a cost relative to the ceiling,
 # not a bare absolute.
 #
@@ -581,8 +581,8 @@ CACHED_ROW="$(report_latency_row "cached (cached-tier-token-bucket, local_cache:
 	echo "path once the 1000-token burst capacity drains. At this rate the comparison is"
 	echo "latency (does the local cache avoid a Redis round-trip), not max throughput —"
 	echo "measuring throughput at these low, realistic limits would mostly measure how"
-	echo "fast Limigo can say no once capacity is exhausted, which is ticket 08's"
-	echo "overshoot harness, not this one's."
+	echo "fast Limigo can say no once capacity is exhausted, which is what"
+	echo "bench/run-overshoot.sh measures, not this harness."
 	echo
 	echo "Both arms are open-model — fixed arrival rate, uncapped worker pool — so these"
 	echo "percentiles carry the same coordinated-omission guarantee as the latency tables"

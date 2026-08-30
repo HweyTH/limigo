@@ -1,4 +1,4 @@
-# Compose override for bench/run-throughput.sh (ticket 07). Points the limigo
+# Compose override for bench/run-throughput.sh. Points the limigo
 # service at bench/config.loadtest.yaml instead of the baked-in
 # config.example.yaml, so the algorithm-axis and node-axis runs hit rules with
 # headroom limits (allow path hot) or the deliberate deny rule, per that file's

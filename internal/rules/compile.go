@@ -196,10 +196,8 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 			var errs error
 			for key, bw := range manager.Snapshot() {
 				delta := bw.PendingDelta()
-				// An exhausted window is re-synced even with nothing to write:
-				// it admits nothing, so it would never accrue a delta, and the
-				// baseline that is denying its requests is only refreshed by a
-				// flush. Skipping it here would wedge it permanently.
+				// Exhausted windows are re-synced even with nothing to write;
+				// skipping them wedges them permanently. See BatchingFixedWindow.Exhausted.
 				if delta == 0 && !bw.Exhausted() {
 					continue
 				}
@@ -237,10 +235,8 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 			for key, tb := range snapshot {
 				sum += tb.FillRatio()
 				delta := tb.PendingDelta()
-				// An exhausted bucket is re-synced even with nothing to write:
-				// it admits nothing, so it would never accrue a delta, and the
-				// baseline that is denying its requests is only refreshed by a
-				// flush. Skipping it here would wedge it permanently.
+				// Exhausted buckets are re-synced even with nothing to write;
+				// skipping them wedges them permanently. See BatchingTokenBucket.Exhausted.
 				if delta == 0 && !tb.Exhausted() {
 					continue
 				}
@@ -305,8 +301,9 @@ func (e *Engine) Evaluate(ctx context.Context, headerName, headerValue, key stri
 }
 
 // Check evaluates key against the first compiled rule whose configured header
-// matches the value returned by headerValue. If no rule matches, Check returns
-// a fail-closed decision with Matched false and no store call.
+// matches the value returned by headerValue. If no rule matches, Check makes no
+// store call and returns Matched false; the caller decides the policy for
+// unmatched requests.
 func (e *Engine) Check(ctx context.Context, key string, headerValue func(string) string) (Decision, error) {
 	if headerValue == nil {
 		return Decision{}, fmt.Errorf("header value lookup must not be nil")
