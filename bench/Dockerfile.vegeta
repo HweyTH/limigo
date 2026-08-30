@@ -1,4 +1,4 @@
-# Load generator image used for in-network runs (ADR-0006). Built locally
+# Load generator image used for in-network runs. Built locally
 # rather than pulled from a registry so the harness has no external image
 # dependency beyond the Go toolchain it already requires.
 FROM golang:1.25-alpine AS build

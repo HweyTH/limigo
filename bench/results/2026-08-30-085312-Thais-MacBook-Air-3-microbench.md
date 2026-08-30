@@ -94,7 +94,7 @@ geomean                                       ¹
 ## Layer 2 — full rule evaluation against real Redis (`internal/rules`)
 
 Rule match + Lua execution + round trip, against a real Redis container
-(ADR-0001: a fake would measure Go function-call overhead and report it as
+(A fake would measure Go function-call overhead and report it as
 Lua execution cost). The uncached/cached pair is the same
 `burst-tier-token-bucket` / `cached-tier-token-bucket` A/B used elsewhere:
 identical capacity and refill rate, differing only in `local_cache`.

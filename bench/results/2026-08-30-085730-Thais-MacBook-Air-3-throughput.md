@@ -39,7 +39,7 @@ headroom to catch up. Each latency table prints the offered rate beside the
 attained rate: if they diverge, the generator failed to keep schedule and the
 percentiles beside them describe a saturated generator, not the service.
 
-## Control rows (ADR-0004)
+## Control rows
 
 GET /healthz, no rule logic, static 200 (CONTEXT.md, control run). Every table
 below opens with these and reports limiter throughput as a cost relative to row 2
@@ -138,7 +138,7 @@ counts a 429 as unsuccessful and so reported 0 req/s for a run that served
 twelve thousand denials a second). Every other row in this file is unaffected —
 they are all 100% success, where the two fields are identical.
 
-## Node axis — scaling curve (ADR-0002)
+## Node axis — scaling curve
 
 token_bucket, 10k keys, allow path, through Traefik. The claim under test is
 approximately linear throughput growth with node count — not any particular

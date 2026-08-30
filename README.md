@@ -130,7 +130,7 @@ All numbers below were measured on this project's own hardware and are reported
 as a cost relative to a measured ceiling, never as a bare absolute — a limiter
 throughput figure alone can't tell you whether the limiter is slow or the
 environment is saturated. Methodology and the reasoning behind each measurement
-choice live in [`docs/adr/`](docs/adr/); raw per-run output lives in
+choice are stated alongside each table below; raw per-run output lives in
 [`bench/results/`](bench/results/).
 
 **No table here reports throughput and latency from the same run**, and that is
@@ -155,7 +155,7 @@ through a stall instead of coordinating with it. Each latency table prints the
 offered rate beside the attained rate: if those diverge, the percentiles beside
 them describe a saturated generator rather than the service.
 
-### 1. Control rows — the ceiling (ADR-0004)
+### 1. Control rows — the ceiling
 
 `GET /healthz` touches no rule logic; load-testing it establishes what the
 environment itself can do before any of Limigo's own cost is added.
@@ -214,7 +214,7 @@ much headroom remains while Limigo is actually working. It is also co-resident
 with Redis in the same Docker VM as everything else here. It bounds Redis on
 this box, and says nothing about Redis in general.
 
-### 2. Overshoot / consistency — the headline result (ADR-0005)
+### 2. Overshoot / consistency — the headline result
 
 The [local-cache accuracy trade-off](#node-local-caching-local_cache) is a
 measured, bounded quantity here, not an assertion. `burst-tier-token-bucket`
@@ -241,7 +241,7 @@ accelerating growth. The full run, plus the accuracy/latency sweep across
 and
 [`bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md`](bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md).
 
-### 3. Scaling curve — throughput at 1, 2, 3 nodes (ADR-0002)
+### 3. Scaling curve — throughput at 1, 2, 3 nodes
 
 `token_bucket`, 10k keys, allow path, through Traefik. Cost is reported against
 the single-replica through-Traefik ceiling above.
@@ -362,7 +362,7 @@ than asserted, and paid for with the ≤0.36% overshoot measured in §2.
 
 ### 6. Microbenchmarks — Go, `-count=10`, reduced with benchstat
 
-The inner two layers of the three-layer benchmark story (ADR-0001), each run ten
+The inner two layers of the three-layer benchmark story, each run ten
 times and reduced by [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)
 rather than reported from a single run. The `±` is a 95% confidence interval; on
 a thermally-throttled laptop sharing cores with Docker, it is what separates a
@@ -429,8 +429,7 @@ The full per-run output backing §1, §1b, §3, §4 and §5 is
 Raw output for every run above — vegeta binaries, generated targets, decoded
 latency samples — is kept under [`bench/results/`](bench/results/) and
 `bench/results/raw/` (gitignored; regenerate by rerunning the scripts rather
-than diffing binary blobs). Design rationale for each methodology choice is in
-[`docs/adr/`](docs/adr/).
+than diffing binary blobs).
 
 ## Installation
 

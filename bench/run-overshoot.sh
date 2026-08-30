@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench/run-overshoot.sh — overshoot / correctness harness (ADR-0005).
+# bench/run-overshoot.sh — overshoot / correctness harness.
 #
 # The headline deliverable: how far Limigo admits requests above its own
 # configured limit when local caching lets nodes admit locally before
@@ -321,7 +321,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 	echo
 	echo "\`config.example.yaml\`'s \`burst-tier-token-bucket\` (no local cache) vs"
 	echo "\`cached-tier-token-bucket\` (identical: capacity $CAPACITY, rate ${REFILL_RATE}/s,"
-	echo "\`local_cache: true\`) — the existing controlled pair (ADR-0005). Both arms fire"
+	echo "\`local_cache: true\`) — the existing controlled pair. Both arms fire"
 	echo "exactly **$REQUESTS requests** at a single key over **${SECONDS_WINDOW}s**"
 	echo "(rate ${RATE}/1s), fresh Redis state per run. A run whose actual request count"
 	echo "didn't match $REQUESTS exactly would abort rather than publish here — see script."
@@ -350,7 +350,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 	echo "**local_cache: true** is the documented trade-off: a non-zero deviation from the"
 	echo "ceiling is expected here and is not by itself a defect — it is the cost of"
 	echo "absorbing bursts locally instead of round-tripping every request to Redis"
-	echo "(CONTEXT.md: local cache, flush interval). ADR-0005 anticipated that deviation"
+	echo "(CONTEXT.md: local cache, flush interval). The deviation was anticipated"
 	echo "as *over*-admission growing with node count; whether this run instead shows"
 	echo "under-admission, and whether either stays bounded, is exactly what the"
 	echo "escalation check below is for — read it before treating this table as the"

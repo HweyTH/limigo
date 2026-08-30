@@ -3,20 +3,20 @@
 # bench/run-throughput.sh — throughput/latency measurement suite.
 #
 # Produces the algorithm comparison table and the scaling curve, both opening
-# with a fresh set of the three control rows (ADR-0004) so every
+# with a fresh set of the three control rows so every
 # limiter number in this file can be read as a cost relative to the ceiling,
 # not a bare absolute.
 #
 # Five run groups, each against POST /v1/check through Traefik (in-network —
 # the primary number per CONTEXT.md), except group 1 which hits /healthz:
 #
-#   1. Control rows       — GET /healthz, 1 replica, no rule logic (ADR-0004).
+#   1. Control rows       — GET /healthz, 1 replica, no rule logic.
 #   2. Algorithm axis      — all four algorithms, allow path, 1 replica, at
 #                            both 1 key and 10k keys (CONTEXT.md, cardinality).
 #   3. Denial axis         — the load-test-deny rule, 1 replica, labelled
 #                            separately from the allow path (CONTEXT.md).
 #   4. Node axis           — token_bucket, 10k keys, allow path, at 1/2/3
-#                            replicas (ADR-0002, scaling curve).
+#                            replicas (scaling curve).
 #   5. Cached vs uncached  — config.example.yaml's burst-tier/cached-tier
 #                            token-bucket pair, held to a fixed rate under
 #                            their shared 200/s refill so the allow path stays
@@ -214,7 +214,7 @@ run_host_attack() {
 # from a closed-loop run. Carries no latency columns by construction: those
 # would be coordinated-omission-contaminated (see THROUGHPUT_FLAGS). When a
 # ceiling is given, appends a "cost vs ceiling" column expressing this row's
-# throughput as a percentage of it (ADR-0004: never a bare absolute).
+# throughput as a percentage of it — never a bare absolute.
 report_throughput_row() {
 	local label="$1" raw="$2" ceiling="${3:-}"
 	local json
@@ -272,7 +272,7 @@ report_latency_row() {
 
 compute_cpusets
 
-# --- group 1: control rows (ADR-0004), fresh for this results file --------
+# --- group 1: control rows, fresh for this results file -------------------
 log "=== control rows ==="
 bring_up 1
 
@@ -472,7 +472,7 @@ CACHED_ROW="$(report_latency_row "cached (cached-tier-token-bucket, local_cache:
 	echo "attained rate: if they diverge, the generator failed to keep schedule and the"
 	echo "percentiles beside them describe a saturated generator, not the service."
 	echo
-	echo "## Control rows (ADR-0004)"
+	echo "## Control rows"
 	echo
 	echo "GET /healthz, no rule logic, static 200 (CONTEXT.md, control run). Every table"
 	echo "below opens with these and reports limiter throughput as a cost relative to row 2"
@@ -555,7 +555,7 @@ CACHED_ROW="$(report_latency_row "cached (cached-tier-token-bucket, local_cache:
 	echo "|---|---|---|---|---|"
 	echo "$DENY_ROW"
 	echo
-	echo "## Node axis — scaling curve (ADR-0002)"
+	echo "## Node axis — scaling curve"
 	echo
 	echo "token_bucket, 10k keys, allow path, through Traefik. The claim under test is"
 	echo "approximately linear throughput growth with node count — not any particular"

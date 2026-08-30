@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench/run-flush-sweep.sh — flush-interval accuracy/latency sweep (ADR-0005).
+# bench/run-flush-sweep.sh — flush-interval accuracy/latency sweep.
 #
 # bench/run-overshoot.sh established *that* local caching overshoots the
 # configured limit. This turns the flush interval — the
@@ -439,7 +439,7 @@ PRIMARY_NODE="${NODE_COUNTS[0]}"
 
 	echo "## Direction and slope"
 	echo
-	echo "Expectation (ADR-0005, CONTEXT.md): a shorter flush interval reconciles the"
+	echo "Expectation (CONTEXT.md): a shorter flush interval reconciles the"
 	echo "local cache with Redis more often, so it should mean tighter accuracy (smaller"
 	echo "|overshoot|) at the cost of more frequent Redis round-trips — which should show"
 	echo "up as *lower* admitted-path latency being harder to sustain, or as latency rising"

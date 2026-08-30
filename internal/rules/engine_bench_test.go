@@ -2,14 +2,14 @@
 
 package rules
 
-// Engine + Redis benchmarks (ADR-0001): a full rule evaluation — rule match,
+// Engine + Redis benchmarks: a full rule evaluation — rule match,
 // Lua execution, round trip — against a real Redis via testcontainers, so
 // the store layer's cost is separable from the pure-algorithm cost measured
 // in internal/limiter. This is the number that justifies the local-cache
 // design existing at all: it's the round trip local caching trades accuracy
 // to avoid.
 //
-// Real Redis is used rather than an in-memory fake (per ADR-0001): a fake
+// Real Redis is used rather than an in-memory fake: a fake
 // does not execute Lua the way real Redis does, so it would measure Go
 // function-call overhead and report it as Lua execution cost.
 //

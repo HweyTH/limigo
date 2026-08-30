@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Pure-algorithm benchmarks (ADR-0001): the innermost layer of the
+// Pure-algorithm benchmarks: the innermost layer of the
 // three-layer benchmark story. These measure algorithm cost in isolation —
 // no store, no HTTP, no container — so later, store- and network-backed
 // measurements can attribute their cost correctly instead of guessing.

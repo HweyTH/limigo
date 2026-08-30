@@ -3,7 +3,7 @@
 # bench/run-microbench.sh — Go microbenchmarks, repeated and summarised with
 # benchstat.
 #
-# The innermost two layers of the three-layer benchmark story (ADR-0001):
+# The innermost two layers of the three-layer benchmark story:
 #
 #   1. internal/limiter — pure algorithm cost, no store, no HTTP, no container.
 #   2. internal/rules   — a full Engine.Check against real Redis via
@@ -171,7 +171,7 @@ fi
 		echo "## Layer 2 — full rule evaluation against real Redis (\`internal/rules\`)"
 		echo
 		echo "Rule match + Lua execution + round trip, against a real Redis container"
-		echo "(ADR-0001: a fake would measure Go function-call overhead and report it as"
+		echo "(A fake would measure Go function-call overhead and report it as"
 		echo "Lua execution cost). The uncached/cached pair is the same"
 		echo "\`burst-tier-token-bucket\` / \`cached-tier-token-bucket\` A/B used elsewhere:"
 		echo "identical capacity and refill rate, differing only in \`local_cache\`."

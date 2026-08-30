@@ -1,10 +1,8 @@
 # Limigo — Shared Context
 
 Working vocabulary for this codebase. When a word here is used in an issue, a
-commit message, an ADR, or a README table, it carries the meaning defined below
+commit message, a design note, or a README table, it carries the meaning defined below
 and no other. If a term starts doing two jobs, split it rather than overloading it.
-
-See `docs/adr/` for the decisions this vocabulary came out of.
 
 ---
 
@@ -46,8 +44,7 @@ trade-off.
 because local caches had not yet reconciled. Expressed as a percentage of the
 configured limit. Expected to be ~0% with `local_cache: false` and non-zero but
 bounded with `local_cache: true`, growing with node count and flush interval.
-**Overshoot is a measured quantity in this project, not an acknowledged risk** —
-see ADR-0005.
+**Overshoot is a measured quantity in this project, not an acknowledged risk.**
 
 **Allow path** — the code path taken when a request is *admitted*. Expensive: it
 mutates counter state and, for uncached rules, executes Lua on Redis.
@@ -81,13 +78,13 @@ two points, 1 key and 10k keys, never blended: 1 key measures contention on a
 single bucket, 10k measures map growth and Redis keyspace behaviour.
 
 **Scaling curve** — throughput and overshoot measured at 1, 2, and 3 replicas.
-Replaces the flat "50k req/s" claim; see ADR-0002.
+Replaces the flat "50k req/s" claim.
 
 ---
 
 ## Standing rules
 
 - No published performance number exists without stated hardware and a
-  reproducible command. See ADR-0002.
+  reproducible command.
 - No aspirational figure appears next to a measured one.
-- Correctness is measured alongside throughput, never assumed from it. See ADR-0005.
+- Correctness is measured alongside throughput, never assumed from it.

@@ -16,7 +16,7 @@ CPU pinning: limigo replica(s) on cores 0-3; in-network generator on
 cores 4-7. The control rows' host-origin leg is **not** CPU-pinned —
 macOS has no per-process CPU affinity API (see bench/run.sh).
 
-## Control rows (ADR-0004)
+## Control rows
 
 GET /healthz, no rule logic, static 200 (CONTEXT.md, control run). Every table
 below opens with these and reports limiter throughput as a cost relative to row 2
@@ -57,7 +57,7 @@ achievable allow-path throughput.
 |---|---|---|---|---|---|---|---|---|
 | fixed_window (limit 1/60s), 1 key | 403341 | 0 | 0.00% | 0.43 | 1.03 | 2.25 | 12.36 | 0.0% of ceiling (cost ~100.0%) |
 
-## Node axis — scaling curve (ADR-0002)
+## Node axis — scaling curve
 
 token_bucket, 10k keys, allow path, through Traefik. The claim under test is
 approximately linear throughput growth with node count — not any particular
@@ -88,7 +88,7 @@ bench/run-overshoot.sh measures, not this harness.
 
 Both rows are throttled to the same 150 req/s, so their near-identical, near-0%
 cost-vs-ceiling figures are expected and not the point of this table — the
-column is kept for consistency with every other table here (ADR-0004: never a
+column is kept for consistency with every other table here (never a
 bare absolute). The comparison that matters is the latency columns to its left.
 
 | row | requests | req/s | success | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) | cost vs ceiling |

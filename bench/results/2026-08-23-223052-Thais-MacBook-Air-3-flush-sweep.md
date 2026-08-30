@@ -57,7 +57,7 @@ sweeps at other node counts show how the curve shifts with node count.
 
 ## Direction and slope
 
-Expectation (ADR-0005, CONTEXT.md): a shorter flush interval reconciles the
+Expectation (CONTEXT.md): a shorter flush interval reconciles the
 local cache with Redis more often, so it should mean tighter accuracy (smaller
 |overshoot|) at the cost of more frequent Redis round-trips — which should show
 up as *lower* admitted-path latency being harder to sustain, or as latency rising
