@@ -34,3 +34,7 @@ bench/results/raw/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local agent scratch space and skill config
+.scratch/
+.claude/
