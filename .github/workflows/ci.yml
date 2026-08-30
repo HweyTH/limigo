@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# Latest patch of the Go line declared in go.mod. Pinning the exact go.mod
+# version instead would build against an unpatched stdlib, which govulncheck
+# rightly fails on. Move this when the go directive moves.
+env:
+  GO_VERSION: "1.25.x"
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -21,7 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -39,7 +45,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.1
@@ -52,7 +58,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - run: go test -short -race -count=1 ./...
 
   # Drives a real Redis via testcontainers, so it needs the runner's Docker daemon.
@@ -63,7 +69,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - run: go test -race -count=1 ./internal/store/...
 
   govulncheck:
@@ -73,5 +79,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
