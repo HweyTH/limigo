@@ -133,22 +133,86 @@ environment is saturated. Methodology and the reasoning behind each measurement
 choice live in [`docs/adr/`](docs/adr/); raw per-run output lives in
 [`bench/results/`](bench/results/).
 
+**No table here reports throughput and latency from the same run**, and that is
+worth a paragraph because it is the single easiest way to publish a rate limiter
+benchmark that is quietly wrong.
+
+Throughput rows are closed-loop: a fixed pool of workers, each sending a request
+and waiting for the response before sending the next. That measures maximum
+sustainable req/s correctly and measures latency badly. When the service stalls,
+every worker is parked waiting, so the requests that were due during the stall
+are never sent and never timed — the worst moments delete their own evidence,
+and the reported p99 *improves* because things got worse. Gil Tene named this
+**coordinated omission**. `vegeta` is normally resistant to it (it timestamps at
+actual send time and grows its worker pool to catch up), but the fixed
+`-max-workers` cap this harness used removed exactly the pool growth that
+resistance depends on.
+
+So every latency figure below comes from a separate **open-model** run: a fixed
+arrival rate of **10,761 req/s** — 70% of the measured ceiling, leaving headroom
+to catch up — with **no worker cap**, so the generator keeps its schedule
+through a stall instead of coordinating with it. Each latency table prints the
+offered rate beside the attained rate: if those diverge, the percentiles beside
+them describe a saturated generator rather than the service.
+
 ### 1. Control rows — the ceiling (ADR-0004)
 
 `GET /healthz` touches no rule logic; load-testing it establishes what the
 environment itself can do before any of Limigo's own cost is added.
 
-| row | req/s | success | p50 (ms) | p99 (ms) |
-|---|---|---|---|---|
-| direct-to-replica, in-network | 18,517 | 100% | 0.09 | 1.64 |
-| **through-Traefik, in-network (ceiling used below)** | **15,852** | 100% | 0.27 | 1.92 |
-| host-origin (crosses the Docker Desktop VM boundary) | 31,503 | 100% | 5.62 | 17.44 |
+| row | req/s | success |
+|---|---|---|
+| direct-to-replica, in-network | 17,916 | 100% |
+| **through-Traefik, in-network (ceiling used below)** | **15,374** | 100% |
+| host-origin (crosses the Docker Desktop VM boundary) | 31,749 | 100% |
 
-Host-origin shows a higher req/s than either in-network row, but at roughly 10x
-the p99 latency — the generator running outside the container is less
-CPU-constrained, not the system being faster. The numbers below use the
-through-Traefik, in-network ceiling, since the algorithm and node axes also
-run in-network through Traefik.
+Host-origin reaches roughly double the in-network rate. The likely reason is
+that the generator running outside the container is not competing for the four
+cores the in-network generator is pinned to — a less constrained measuring
+instrument rather than a faster system. That reading is not proven by anything
+in this table: it was previously supported by host-origin's ~10× worse p99, and
+the open-model latency run was only done for the through-Traefik path, so no
+published figure backs it now.
+
+The reason for not using host-origin as the ceiling does not depend on that
+reading. It crosses the Docker Desktop VM boundary, which no in-network row
+crosses, so it does not characterise the same path. Everything below uses the
+through-Traefik, in-network ceiling, since the algorithm and node axes run
+in-network through Traefik too.
+
+The same control path, measured open-model for its latency:
+
+| row | offered req/s | attained req/s | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |
+|---|---|---|---|---|---|---|
+| through-Traefik, in-network | 10,761 | 10,761 | 0.19 | 0.47 | 1.20 | 13.16 |
+
+### 1b. The other bound — what Redis alone can do
+
+The control rows bound the *transport*. This bounds the other end: what Redis
+can do with Limigo's own `token_bucket.lua`, driven by `redis-benchmark`, with
+no Go, no HTTP and no JSON in the path. Every uncached request must wait for
+exactly this script, so no uncached row below can exceed it.
+
+| bound | req/s | p99 (ms) |
+|---|---|---|
+| `redis-benchmark evalsha` (`token_bucket.lua`) | 89,127 | 1.04 |
+
+The script is `SCRIPT LOAD`ed from the same file `internal/store/lua` embeds, so
+the SHA benchmarked is the SHA Limigo runs; `-r 10000` matches the 10k-key
+cardinality of the axes below, and `-P 1` leaves pipelining off because Limigo
+issues one `EVALSHA` per request and does not pipeline.
+
+**This is the number that reframes everything below it.** Limigo's best uncached
+allow-path row is 13,811 req/s — about **15% of what Redis served for this
+script**. §4 uses that to argue Redis is not the obvious constraint here.
+
+Two caveats travel with the row and are not dropped when it is cited.
+`redis-benchmark` drives its own 50 connections rather than replaying Limigo's
+concurrency pattern, and it ran **while Limigo was idle** — so 89,127 is an
+upper bound on the Redis leg under that tool's load, not a measurement of how
+much headroom remains while Limigo is actually working. It is also co-resident
+with Redis in the same Docker VM as everything else here. It bounds Redis on
+this box, and says nothing about Redis in general.
 
 ### 2. Overshoot / consistency — the headline result (ADR-0005)
 
@@ -184,57 +248,158 @@ the single-replica through-Traefik ceiling above.
 
 | nodes | req/s | cost vs ceiling |
 |---|---|---|
-| 1 | 13,400 | 84.5% of ceiling |
-| 2 | 13,219 | 83.4% of ceiling |
-| 3 | 12,853 | 81.1% of ceiling |
+| 1 | 12,367 | 80.4% of ceiling |
+| 2 | 13,147 | 85.5% of ceiling |
+| 3 | 12,765 | 83.0% of ceiling |
 
-This is flat, not linear — adding replicas did **not** increase throughput on
-this hardware. The bottleneck is named rather than hidden: every row above is
-generated by one in-network vegeta container, CPU-pinned to half of an 8-core
-Apple M2 (see control rows), and it saturates at essentially the same rate
-regardless of how many Limigo replicas sit behind Traefik. What this table
-actually supports is a narrower claim than "throughput scales with node
-count": across 1–3 replicas, correctness holds (§2 above) and per-request cost
-does not degrade — adding nodes doesn't make the system slower under the load
-this generator can produce. Confirming throughput scaling would need a
-distributed load generator, which is out of scope here.
+This is flat and non-monotonic — adding replicas did **not** increase throughput
+on this hardware, and the spread between these three rows is smaller than the
+run-to-run variance of the measurement itself (the single-replica `token_bucket`
+row in §4, same configuration, came in at 13,811 in the same suite).
+
+The bottleneck is named rather than hidden: every row above is generated by one
+in-network vegeta container, CPU-pinned to half of an 8-core Apple M2, and it
+saturates at essentially the same rate regardless of how many Limigo replicas
+sit behind Traefik. §1b rules out the other candidate — Redis is serving these
+runs at about 15% of its measured capacity for this script, so it is not what
+these replicas are queuing behind.
+
+What this table supports is therefore a narrower claim than "throughput scales
+with node count", and the narrower claim is the one made here: across 1–3
+replicas, correctness holds (§2) and per-request cost does not degrade — adding
+nodes does not make the system slower or less correct under the load this
+generator can produce. Confirming throughput scaling would need load generated
+from more than one physical machine, which this hardware cannot provide;
+[issue #5](https://github.com/HweyTH/limigo/issues/5) tracks closing that gap
+honestly rather than re-running this table hoping for a different shape.
 
 ### 4. Algorithm comparison — uncached, 10k keys, in-network
 
 All four algorithms, allow path, 1 replica, headroom limits so the allow path
 stays hot (`bench/config.loadtest.yaml`).
 
-| algorithm | req/s | p99 (ms) | cost vs ceiling |
-|---|---|---|---|
-| fixed_window | 13,725 | 1.67 | 86.6% of ceiling |
-| sliding_window | 13,409 | 1.69 | 84.6% of ceiling |
-| token_bucket | 13,494 | 1.68 | 85.1% of ceiling |
-| leaky_bucket | 13,561 | 1.98 | 85.5% of ceiling |
+| algorithm | req/s | cost vs ceiling |
+|---|---|---|
+| fixed_window | 13,534 | 88.0% of ceiling |
+| sliding_window | 13,647 | 88.8% of ceiling |
+| token_bucket | 13,811 | 89.8% of ceiling |
+| leaky_bucket | 12,573 | 81.8% of ceiling |
 
-The four algorithms cost within a couple of points of each other. The
-dominant cost at this cardinality is the Redis round-trip every uncached rule
-pays: an isolated `Engine.Check` against real Redis costs ~119µs uncached
-versus ~25ns when `local_cache: true` skips the round-trip entirely
-(`internal/rules/engine_bench_test.go`) — four orders of magnitude, dwarfing
-any difference between algorithms. Pick an algorithm for its accuracy/fairness
-properties (above), not its throughput; they don't meaningfully differ on that
-axis.
+And their latency, measured open-model at 10,761 req/s. The control row for this
+table is §1's open-model control (p50 0.19, p99 1.20 at the same offered rate) —
+the same path with no rule logic, so each row below reads as rule-evaluation cost
+added to it:
+
+| algorithm | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |
+|---|---|---|---|---|
+| fixed_window | 0.30 | 0.77 | 1.92 | 23.79 |
+| sliding_window | 0.31 | 0.84 | 2.23 | 23.48 |
+| token_bucket | 0.33 | 0.84 | 1.86 | 23.64 |
+| leaky_bucket | 0.43 | 1.57 | **4.94** | 27.86 |
+
+On throughput the four sit within a few points of each other. On tail latency
+they do not: **leaky_bucket's p99 is roughly 2.5× the other three**, a gap that
+only appears under open-model measurement. The earlier closed-loop numbers put
+leaky_bucket at 1.98ms against 1.67–1.69ms for the others
+([2026-08-23 run](bench/results/2026-08-23-230659-Thais-MacBook-Air-3-throughput.md))
+— a difference small enough to dismiss as noise. It was not noise; it was
+coordinated omission hiding most of it.
+
+**Where the cost actually goes.** The intuitive answer is the Redis round-trip,
+and the evidence here does not support it. An isolated `Engine.Check` against
+real Redis costs 122.9µs uncached versus 25.18ns cached (§6) — four orders of
+magnitude — which makes the round-trip look dominant. But that is *serial
+latency*, not a throughput bound. Redis served this script at 89,127 req/s in
+§1b, and these rows ask about 13.8k.
+
+The stronger evidence is the control ceiling. The same path with **no rule logic
+and no Redis at all** tops out at 15,374 req/s, and `token_bucket` reaches 13,811
+of it — so rule matching plus the entire Redis round-trip costs about **10% of a
+ceiling set by HTTP, JSON, Traefik and a co-resident load generator**. Whatever
+is limiting these runs, most of it is already present when Redis is not.
+
+Two things stop this from being a claim that Redis has 6× headroom in
+production. §1b's 89,127 was measured with `redis-benchmark` driving its own 50
+connections **while Limigo was idle** — it is an upper bound on the Redis leg
+under that tool's load, not a measurement of headroom remaining while Limigo is
+working, and it is co-resident with everything else in the same Docker VM.
+Second, this table's own spread argues against a purely transport-bound story:
+`leaky_bucket` at 81.8% versus `token_bucket` at 89.8% is an 8-point,
+algorithm-attributable gap that a system bound entirely by transport would not
+produce.
+
+So the defensible statement is the narrow one: **Redis is not the obvious
+constraint on this hardware**, and the missing throughput is mostly accounted
+for before Redis enters the picture. On bigger hardware, or with the generator
+moved off-box, that balance would shift.
+
+Pick an algorithm for its accuracy and fairness properties (above) and, if tail
+latency matters to you, note leaky_bucket's p99 — not for throughput, where they
+don't meaningfully differ.
 
 ### 5. Cached vs uncached — the controlled pair
 
 Same `burst-tier-token-bucket` / `cached-tier-token-bucket` pair as §2, both
 held to a fixed 150 req/s (under their shared 200/s refill) so the allow path
 stays hot for both arms. At this rate the comparison is latency, not max
-throughput.
+throughput. Both arms are open-model, so these percentiles carry the same
+guarantee as every other latency table here; §1's open-model control row is the
+control for this table as it is for §4.
 
-| arm | p50 (ms) | p99 (ms) | max (ms) |
-|---|---|---|---|
-| uncached | 1.30 | 2.79 | 14.54 |
-| cached (`local_cache: true`) | 1.00 | 2.00 | 6.60 |
+**This is the latency headline.** It is the one place where a design decision
+Limigo made — node-local caching — is isolated against an otherwise identical
+rule and its cost measured on both axes at once: the latency it buys here, and
+the ≤0.36% accuracy it spends in §2.
 
-Skipping the Redis round-trip on the allow path cuts p99 latency by ~28% and
-tail (max) latency by more than half — the win `local_cache` is designed to
-produce, quantified rather than asserted.
+| arm | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) |
+|---|---|---|---|---|
+| uncached | 1.21 | 2.12 | 3.40 | 12.65 |
+| cached (`local_cache: true`) | 1.00 | 1.34 | 1.92 | 10.38 |
+
+Skipping the Redis round-trip on the allow path cuts p99 latency by **44%** and
+p95 by **37%** — the win `local_cache` is designed to produce, quantified rather
+than asserted, and paid for with the ≤0.36% overshoot measured in §2.
+
+### 6. Microbenchmarks — Go, `-count=10`, reduced with benchstat
+
+The inner two layers of the three-layer benchmark story (ADR-0001), each run ten
+times and reduced by [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat)
+rather than reported from a single run. The `±` is a 95% confidence interval; on
+a thermally-throttled laptop sharing cores with Docker, it is what separates a
+measurement from an anecdote.
+
+| benchmark | median | ± |
+|---|---|---|
+| `EngineCheck_Uncached` (real Redis, full round trip) | 122.9µs | 5% |
+| `EngineCheck_Cached` (`local_cache: true`, no round trip) | 25.18ns | 0% |
+
+The pure-algorithm layer, with no store, HTTP, or container in the path — all
+twelve rows landed within ±2%:
+
+| algorithm | serial | parallel (1k keys) |
+|---|---|---|
+| fixed_window | 28.56ns ± 1% | 10.62ns ± 2% |
+| sliding_window | 48.86ns ± 1% | 91.31ns ± 1% |
+| token_bucket | 77.45ns ± 1% | 89.93ns ± 2% |
+| leaky_bucket | 57.69ns ± 1% | 91.88ns ± 1% |
+| fixed_window (batched) | 10.71ns ± 1% | 88.00ns ± 2% |
+| token_bucket (batched) | 10.70ns ± 0% | 88.98ns ± 2% |
+
+The batched variants are the ones node-local caching uses: ~10.7ns serial
+against 28.6–77.5ns for their uncached equivalents.
+
+Five of the six parallel rows land in a tight 88–92ns band, well above their own
+serial cost. That band is not the algorithm — it is the manager's per-key
+routing lock, which every concurrent caller has to pass through, and it dominates
+whatever the algorithm does behind it.
+
+`fixed_window` is the exception that proves it: 10.62ns parallel against 28.56ns
+serial, *faster* under concurrency and 8× off the band. It is the one algorithm
+with no manager in this codebase — uncached fixed-window rules go straight to
+Redis, so its parallel benchmark pre-allocates one instance per key
+(`internal/limiter/bench_test.go`). No shared lock to serialise on, so the work
+spreads across cores instead of queuing. The contrast is the cleanest evidence
+here that the other five rows are measuring the lock rather than the algorithm.
 
 ### Hardware and reproduction
 
@@ -243,12 +408,23 @@ All numbers above were measured on:
 - Host: `Darwin Thais-MacBook-Air-3.local 25.3.0 Darwin Kernel Version 25.3.0 arm64`
 - CPU: Apple M2 (8 logical cores)
 - Docker: 27.5.1
+- Go: 1.27.0
 
 ```bash
-bench/run-throughput.sh   # §1, §3, §4, §5: control rows, algorithm axis, scaling curve, cached-vs-uncached
+bench/run-throughput.sh   # §1, §1b, §3, §4, §5: control rows, Redis bound, algorithm axis, scaling curve, cached-vs-uncached
 bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: overshoot / consistency
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
+bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat
 ```
+
+`bench/run-microbench.sh` needs `benchstat` on `PATH`
+(`go install golang.org/x/perf/cmd/benchstat@latest`); pass `--skip-engine` to
+run the pure-algorithm layer without Docker.
+
+The full per-run output backing §1, §1b, §3, §4 and §5 is
+[`bench/results/2026-08-30-085730-Thais-MacBook-Air-3-throughput.md`](bench/results/2026-08-30-085730-Thais-MacBook-Air-3-throughput.md);
+§6 is
+[`bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md`](bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md).
 
 Raw output for every run above — vegeta binaries, generated targets, decoded
 latency samples — is kept under [`bench/results/`](bench/results/) and
