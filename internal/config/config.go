@@ -80,6 +80,6 @@ type Rule struct {
 	// LocalCache opts this rule into node-local burst absorption: requests are
 	// admitted against an in-process cache and periodically reconciled with
 	// Redis, trading a small accuracy window for lower latency and Redis load.
-	// Only supported for Fixed Window and Token Bucket
+	// Only supported for FixedWindow and TokenBucket.
 	LocalCache bool `yaml:"local_cache,omitempty"`
 }

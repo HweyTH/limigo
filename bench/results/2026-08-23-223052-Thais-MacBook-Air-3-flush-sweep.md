@@ -15,7 +15,7 @@ bench/run-flush-sweep.sh
 ## Method
 
 `config.example.yaml`'s `cached-tier-token-bucket` (capacity 1000, rate
-200/s, `local_cache: true`) — the same rule ticket 08 uses. Only the
+200/s, `local_cache: true`) — the same rule the overshoot harness uses. Only the
 cached arm is swept; the uncached arm doesn't read the flush interval at all.
 
 At every point, exactly **6000 requests** are fired at a single key over
@@ -26,7 +26,7 @@ rate * seconds = 1000 + 200 * 3 = **1600**
 of node count or flush interval. Overshoot = (admitted - 1600) /
 1600, as a percentage.
 
-This offered load exceeds the ceiling on purpose (same as ticket 08), so most
+This offered load exceeds the ceiling on purpose (as in the overshoot harness), so most
 requests are denied once the bucket empties. Denial-path latency is cheap and
 unrelated to the flush interval (CONTEXT.md), so latency percentiles below are
 computed from admitted (allow-path) responses only, decoded from the raw vegeta
@@ -57,7 +57,7 @@ sweeps at other node counts show how the curve shifts with node count.
 
 ## Direction and slope
 
-Expectation (ADR-0005, CONTEXT.md): a shorter flush interval reconciles the
+Expectation (CONTEXT.md): a shorter flush interval reconciles the
 local cache with Redis more often, so it should mean tighter accuracy (smaller
 |overshoot|) at the cost of more frequent Redis round-trips — which should show
 up as *lower* admitted-path latency being harder to sustain, or as latency rising

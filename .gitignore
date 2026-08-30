@@ -34,3 +34,11 @@ bench/results/raw/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local agent scratch space and skill config
+.scratch/
+.claude/
+
+# Agent instructions and internal design notes: local only, never published
+CLAUDE.md
+docs/

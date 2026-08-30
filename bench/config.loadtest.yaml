@@ -1,7 +1,6 @@
-# Load-test rule configs for tickets 07/08 (throughput + overshoot harnesses).
-# Not used by the control runs in ticket 06, which hit /healthz and never touch
-# rule logic at all — this file exists so those later runs have somewhere to
-# point --config.
+# Load-test rule configs for bench/run-throughput.sh and bench/run-overshoot.sh.
+# The control runs hit /healthz and never touch rule logic at all — this file
+# exists so the measurement runs have somewhere to point --config.
 #
 # Every "load-test-*" rule below except load-test-deny sets its limit far above
 # any offered load the generator can produce on this hardware. Without that
@@ -13,14 +12,13 @@
 # counter mutation and, for uncached rules, a Lua round-trip to Redis.
 #
 # load-test-deny is the deliberate exception: limit 1 per window, so every
-# request past the first is denied — this is what ticket 07's denial-path run
-# points at, and it must stay labelled as denial-path, never blended with the
+# request past the first is denied — this is what the denial-path run points
+# at, and it must stay labelled as denial-path, never blended with the
 # allow-path rows above.
 #
 # None of these rules set local_cache — the cached-vs-uncached comparison uses
-# the existing burst-tier/cached-tier pair in config.example.yaml instead (see
-# docs/plans/benchmark-load-test.md, "Repo facts"). Constructing a second pair
-# here would just be a second, redundant A/B.
+# the existing burst-tier/cached-tier pair in config.example.yaml instead.
+# Constructing a second pair here would just be a second, redundant A/B.
 rules:
   - name: load-test-fixed-window
     match:

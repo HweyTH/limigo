@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench/run-overshoot.sh — overshoot / correctness harness (ticket 08, ADR-0005).
+# bench/run-overshoot.sh — overshoot / correctness harness.
 #
 # The headline deliverable: how far Limigo admits requests above its own
 # configured limit when local caching lets nodes admit locally before
@@ -12,12 +12,12 @@
 # existing controlled A/B this needs. Not bench/config.loadtest.yaml, so no
 # compose override is applied here; the default image config is used as-is.
 #
-# Counting must be exact (ticket 08), so this does not run an open-ended,
+# Counting must be exact, so this does not run an open-ended,
 # duration-based attack and hope a throughput figure falls out. Instead a
 # fixed request count is fired over a fixed window (rate = requests/seconds),
 # and the actual "requests" figure vegeta reports is checked against that
 # target — a mismatch aborts the run rather than publishing an approximate
-# count. Denials get their own status code (ticket 01: 429), so admitted vs
+# count. Denials get their own status code (429), so admitted vs
 # denied is read straight off vegeta's status-code histogram, no body
 # parsing needed.
 #
@@ -82,7 +82,7 @@ if ((REQUESTS % SECONDS_WINDOW != 0)); then
 fi
 RATE=$((REQUESTS / SECONDS_WINDOW))
 
-# The controlled pair this ticket requires (config.example.yaml) — hardcoded
+# The controlled A/B pair (config.example.yaml) — hardcoded
 # because the comparison depends on these exact numbers matching that file.
 # If that file's burst-tier-token-bucket / cached-tier-token-bucket pair ever
 # changes, this must change with it.
@@ -244,10 +244,10 @@ row_field() { cut -d'|' -f"$2" <<<"$1"; }
 
 # --- escalation check -------------------------------------------------------
 # "Bounded" is the claim under test — for BOTH arms, not just the cached one:
-# the ticket also requires the uncached arm's near-zero result to be
-# investigated rather than published if it ever isn't near zero. A run that
-# looks unbounded or super-linear in either arm must be surfaced loudly, not
-# folded quietly into a results table (ticket 08).
+# the uncached arm's near-zero result must be investigated rather than
+# published if it ever isn't near zero. A run that looks unbounded or
+# super-linear in either arm must be surfaced loudly, not folded quietly into
+# a results table.
 #
 # This checks the MAGNITUDE of the deviation from EXPECTED_CEILING, not just
 # its sign: an early version of this script only watched for accelerating
@@ -285,8 +285,8 @@ CACHED_ESCALATION="$(check_escalation "local_cache: true" \
 	"$(row_field "${CACHED_ROWS[0]}" 8)" "$(row_field "${CACHED_ROWS[1]}" 8)" "$(row_field "${CACHED_ROWS[2]}" 8)")"
 ESCALATION="$(printf '%s\n%s' "$UNCACHED_ESCALATION" "$CACHED_ESCALATION" | sed '/^$/d')"
 
-# The stated bound the ticket's checklist asks for: the largest |overshoot|
-# seen across 1/2/3 nodes for the cached arm.
+# The published bound: the largest |overshoot| seen across 1/2/3 nodes for the
+# cached arm.
 CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_field "${CACHED_ROWS[1]}" 8)" -v o3="$(row_field "${CACHED_ROWS[2]}" 8)" 'BEGIN {
 	a1 = (o1 < 0 ? -o1 : o1); a2 = (o2 < 0 ? -o2 : o2); a3 = (o3 < 0 ? -o3 : o3)
 	m = a1; if (a2 > m) m = a2; if (a3 > m) m = a3
@@ -321,7 +321,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 	echo
 	echo "\`config.example.yaml\`'s \`burst-tier-token-bucket\` (no local cache) vs"
 	echo "\`cached-tier-token-bucket\` (identical: capacity $CAPACITY, rate ${REFILL_RATE}/s,"
-	echo "\`local_cache: true\`) — the existing controlled pair (ADR-0005). Both arms fire"
+	echo "\`local_cache: true\`) — the existing controlled pair. Both arms fire"
 	echo "exactly **$REQUESTS requests** at a single key over **${SECONDS_WINDOW}s**"
 	echo "(rate ${RATE}/1s), fresh Redis state per run. A run whose actual request count"
 	echo "didn't match $REQUESTS exactly would abort rather than publish here — see script."
@@ -350,7 +350,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 	echo "**local_cache: true** is the documented trade-off: a non-zero deviation from the"
 	echo "ceiling is expected here and is not by itself a defect — it is the cost of"
 	echo "absorbing bursts locally instead of round-tripping every request to Redis"
-	echo "(CONTEXT.md: local cache, flush interval). ADR-0005 anticipated that deviation"
+	echo "(CONTEXT.md: local cache, flush interval). The deviation was anticipated"
 	echo "as *over*-admission growing with node count; whether this run instead shows"
 	echo "under-admission, and whether either stays bounded, is exactly what the"
 	echo "escalation check below is for — read it before treating this table as the"
@@ -364,7 +364,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 		echo
 		echo "$ESCALATION"
 		echo
-		echo "Per ticket 08, this blocks recommending local caching as a default until"
+		echo "This blocks recommending local caching as a default until"
 		echo "investigated — it is a design finding, not a number to publish quietly."
 	else
 		echo "## Escalation check"

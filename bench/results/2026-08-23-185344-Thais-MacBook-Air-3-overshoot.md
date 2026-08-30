@@ -16,7 +16,7 @@ bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200
 
 `config.example.yaml`'s `burst-tier-token-bucket` (no local cache) vs
 `cached-tier-token-bucket` (identical: capacity 1000, rate 200/s,
-`local_cache: true`) — the existing controlled pair (ADR-0005). Both arms fire
+`local_cache: true`) — the existing controlled pair. Both arms fire
 exactly **4000 requests** at a single key over **2s**
 (rate 2000/1s), fresh Redis state per run. A run whose actual request count
 didn't match 4000 exactly would abort rather than publish here — see script.
@@ -43,7 +43,7 @@ node count demonstrates Lua atomicity holding under genuine cross-node concurren
 **local_cache: true** is the documented trade-off: a non-zero deviation from the
 ceiling is expected here and is not by itself a defect — it is the cost of
 absorbing bursts locally instead of round-tripping every request to Redis
-(CONTEXT.md: local cache, flush interval). ADR-0005 anticipated that deviation
+(CONTEXT.md: local cache, flush interval). The deviation was anticipated
 as *over*-admission growing with node count; whether this run instead shows
 under-admission, and whether either stays bounded, is exactly what the
 escalation check below is for — read it before treating this table as the
@@ -56,7 +56,7 @@ escalation check below is for — read it before treating this table as the
 
 local_cache: true: unbounded-looking under-admission (fewer requests admitted than the expected ceiling) at 3 nodes — |overshoot| is 19.57% of the configured limit
 
-Per ticket 08, this blocks recommending local caching as a default until
+This blocks recommending local caching as a default until
 investigated — it is a design finding, not a number to publish quietly.
 
 Raw vegeta output and generated target files are kept under

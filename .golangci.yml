@@ -1,0 +1,3 @@
+# Default ruleset, no customisation: the tree is expected to pass golangci-lint
+# as shipped, so this file only pins the config schema version.
+version: "2"

@@ -3,7 +3,7 @@ package api
 import "net/http"
 
 // NewHealthzHandler returns an HTTP handler for GET /healthz: the control
-// endpoint used to establish a load test's ceiling (ADR-0004). It must stay
+// endpoint used to establish a load test's ceiling. It must stay
 // trivial forever — no body parsing, no rule evaluation, no store access, no
 // dependency probing. Anything added here (a Redis ping, a readiness check)
 // silently contaminates every published measurement that uses it as a

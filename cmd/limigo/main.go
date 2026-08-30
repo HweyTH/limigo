@@ -35,11 +35,15 @@ type options struct {
 
 func main() {
 	if err := run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr); err != nil {
-		if _, writeErr := fmt.Fprintf(os.Stderr, "limigo: %v\n", err); writeErr != nil {
-			os.Exit(1)
-		}
+		logf(os.Stderr, "limigo: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// logf writes a diagnostic line, discarding any write error. Used on paths that
+// have no better way to report a failing stdout or stderr than to carry on.
+func logf(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
 }
 
 // run performs startup work with injectable process dependencies so tests can
@@ -122,36 +126,37 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	defer stop()
 
 	go func() {
+		reloadFailed := func(err error) {
+			m.IncConfigReload(false)
+			logf(stderr, "limigo: config reload failed: %v\n", err)
+		}
 		onChange := func() {
 			newCfg, err := config.Load(opts.configPath)
 			if err != nil {
-				m.IncConfigReload(false)
-				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				reloadFailed(err)
 				return
 			}
 			if err := config.Validate(newCfg); err != nil {
-				m.IncConfigReload(false)
-				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				reloadFailed(err)
 				return
 			}
 			newEngine, err := rules.Compile(newCfg, redisStore, m)
 			if err != nil {
-				m.IncConfigReload(false)
-				fmt.Fprintf(stderr, "limigo: config reload failed: %v\n", err)
+				reloadFailed(err)
 				return
 			}
-			// Flush the outgoing engine's local caches before swapping it out —
-			// holder still points at the old engine here, so this reconciles any
-			// pending local_cache admits with Redis before they become unreachable.
+			// holder still points at the outgoing engine here, so this reconciles
+			// its pending local_cache admits with Redis before the swap makes them
+			// unreachable.
 			if err := holder.FlushLocalCaches(ctx); err != nil {
-				fmt.Fprintf(stderr, "limigo: flush local caches before reload failed: %v\n", err)
+				logf(stderr, "limigo: flush local caches before reload failed: %v\n", err)
 			}
 			holder.Store(newEngine)
 			m.IncConfigReload(true)
-			fmt.Fprintf(stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), opts.configPath)
+			logf(stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), opts.configPath)
 		}
 		if err := config.Watch(ctx, opts.configPath, onChange); err != nil {
-			fmt.Fprintf(stderr, "limigo: config watcher stopped: %v\n", err)
+			logf(stderr, "limigo: config watcher stopped: %v\n", err)
 		}
 	}()
 
@@ -164,7 +169,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 				return
 			case <-cacheFlushTicker.C:
 				if err := holder.FlushLocalCaches(ctx); err != nil {
-					fmt.Fprintf(stderr, "limigo: local cache flush failed: %v\n", err)
+					logf(stderr, "limigo: local cache flush failed: %v\n", err)
 				}
 			}
 		}
@@ -263,7 +268,7 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 		return opts, fmt.Errorf("config path must not be empty")
 	}
 	if strings.TrimSpace(opts.redisAddr) == "" {
-		return opts, fmt.Errorf("Redis address must not be empty")
+		return opts, fmt.Errorf("redis address must not be empty")
 	}
 	if strings.TrimSpace(opts.httpAddr) == "" {
 		return opts, fmt.Errorf("HTTP address must not be empty")

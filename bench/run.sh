@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench/run.sh — the three control rows (ADR-0004).
+# bench/run.sh — the three control rows.
 #
 # Runs a vegeta load test against GET /healthz (no rule logic, CONTEXT.md
 # "control run") and writes a dated results file with all three rows:
@@ -8,9 +8,9 @@
 #   1. direct   — in-network, straight to one limigo replica (Go HTTP stack only)
 #   2. proxy    — in-network, through Traefik (adds proxy cost)
 #   3. host     — from the host, through Traefik (adds the Docker Desktop VM
-#                 network boundary on top of the proxy cost — see ADR-0003
-#                 consequences: individual replicas have no host port, so
-#                 Traefik is the only path reachable from outside the network)
+#                 network boundary on top of the proxy cost. Individual
+#                 replicas have no host port, so Traefik is the only path
+#                 reachable from outside the network)
 #
 # Usage: bench/run.sh [--duration 30s] [--max-workers 200] [--keep-stack]
 #
@@ -189,7 +189,7 @@ report_row() {
 	echo "cores $GEN_CPUSET. The host-origin row is **not** CPU-pinned — macOS has no"
 	echo "per-process CPU affinity API, so this is a known gap rather than an omission."
 	echo
-	echo "## Control rows (ADR-0004)"
+	echo "## Control rows"
 	echo
 	echo "All three rows hit \`GET /healthz\` — no rule logic, static 200 (CONTEXT.md,"
 	echo "control run). Rate is unbounded (\`-rate=0\`, capped by \`-max-workers=$MAX_WORKERS\`),"

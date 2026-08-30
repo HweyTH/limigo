@@ -19,7 +19,7 @@ func Watch(ctx context.Context, path string, onChange func()) error {
 	if err != nil {
 		return fmt.Errorf("create config watcher: %w", err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	watchDir := filepath.Dir(path)
 	if err := watcher.Add(watchDir); err != nil {

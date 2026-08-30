@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 #
-# bench/run-flush-sweep.sh — flush-interval accuracy/latency sweep (ticket 09,
-# ADR-0005).
+# bench/run-flush-sweep.sh — flush-interval accuracy/latency sweep.
 #
-# Ticket 08 (bench/run-overshoot.sh) established *that* local caching
-# overshoots the configured limit. This turns the flush interval — the
+# bench/run-overshoot.sh established *that* local caching overshoots the
+# configured limit. This turns the flush interval — the
 # tunable knob on that trade-off (CONTEXT.md: "flush interval") — into a
 # curve: at each interval, how much accuracy do you buy, and what does it
 # cost in latency.
 #
-# Uses the same controlled config.example.yaml pair ticket 08 used
+# Uses the same controlled config.example.yaml pair as the overshoot harness
 # (cached-tier-token-bucket, capacity 1000, rate 200/s, local_cache: true).
 # Only the cached arm is swept: the uncached arm never reads the flush
 # interval at all (it makes no local admission decisions to reconcile), so
@@ -20,7 +19,7 @@
 # (default: unset -> blank -> main.go's own 10ms default).
 #
 # Each (node count, interval) point fires the same fixed, over-driven request
-# count ticket 08 uses, at a single key, so the resulting overshoot is
+# count the overshoot harness uses, at a single key, so the resulting overshoot is
 # comparable across the whole sweep and computed against the same
 # hardware-independent expected ceiling. That offered load denies most
 # requests once the bucket is exhausted (CONTEXT.md: denial path is cheap,
@@ -34,10 +33,9 @@
 # Usage: bench/run-flush-sweep.sh [--nodes "3 1"] [--intervals "1ms 10ms 100ms 1000ms"]
 #                                  [--requests 6000] [--seconds 3] [--max-workers 500] [--keep-stack]
 #
-# The first entry in --nodes is the primary, fixed-node-count sweep the
-# ticket requires. Any further entries are additional fixed-node-count
-# sweeps run the same way, cheaply reusing the same harness, to show how the
-# curve shifts with node count (ticket 09, optional-if-cheap).
+# The first entry in --nodes is the primary, fixed-node-count sweep. Any
+# further entries are additional fixed-node-count sweeps run the same way,
+# reusing the same harness, to show how the curve shifts with node count.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -107,8 +105,8 @@ if ((${#INTERVALS[@]} < 4)); then
 	exit 1
 fi
 
-# The controlled pair this ticket requires (config.example.yaml), same as
-# ticket 08 — hardcoded because the expected-ceiling comparison depends on
+# The controlled A/B pair (config.example.yaml), same as the overshoot
+# harness — hardcoded because the expected-ceiling comparison depends on
 # these exact numbers matching that file.
 CAPACITY=1000
 REFILL_RATE=200
@@ -142,7 +140,7 @@ compute_cpusets() {
 
 # bring_up <scale-n> <flush-interval> — clean-starts the default stack
 # (config.example.yaml, baked into the image — no compose override, same as
-# ticket 08) scaled to N limigo replicas, with LIMIGO_CACHE_FLUSH_INTERVAL
+# the overshoot harness) scaled to N limigo replicas, with LIMIGO_CACHE_FLUSH_INTERVAL
 # exported into this shell so docker-compose.yml's variable substitution
 # picks it up. A fresh stack means a fresh, empty Redis every time: state
 # from a previous interval, node count, never leaks into the next point.
@@ -175,7 +173,7 @@ compute_cpusets
 PROXY_URL="http://traefik/v1/check"
 
 # run_attack <name> — fires exactly REQUESTS requests at a single key
-# (cardinality 1: single-bucket contention, same as ticket 08) against the
+# (cardinality 1: single-bucket contention, same as the overshoot harness) against the
 # cached-tier-token-bucket rule, over SECONDS_WINDOW seconds.
 run_attack() {
 	local name="$1"
@@ -276,7 +274,7 @@ measure() {
 row_field() { cut -d'|' -f"$2" <<<"$1"; }
 
 # summarize_sweep <node> <rows...> — states the actual observed direction
-# and rough slope in prose (ticket 09: not left for the reader to infer),
+# and rough slope in prose, rather than leaving it for the reader to infer,
 # comparing the shortest and longest flush interval in the sweep and noting
 # the biggest single step, rather than just the two endpoints.
 summarize_sweep() {
@@ -310,7 +308,7 @@ summarize_sweep() {
 }
 
 # check_curve <label> <rows...> — flat-or-non-monotonic investigation
-# (ticket 09: report, don't smooth over). "Flat" = the |overshoot| range
+# reported rather than smoothed over. "Flat" = the |overshoot| range
 # across the whole sweep is small relative to the configured limit. Sweeps
 # only ever have as many points as --intervals, so this walks the row array
 # rather than assuming exactly 3 or 4 rows.
@@ -402,7 +400,7 @@ PRIMARY_NODE="${NODE_COUNTS[0]}"
 	echo "## Method"
 	echo
 	echo "\`config.example.yaml\`'s \`cached-tier-token-bucket\` (capacity $CAPACITY, rate"
-	echo "${REFILL_RATE}/s, \`local_cache: true\`) — the same rule ticket 08 uses. Only the"
+	echo "${REFILL_RATE}/s, \`local_cache: true\`) — the same rule the overshoot harness uses. Only the"
 	echo "cached arm is swept; the uncached arm doesn't read the flush interval at all."
 	echo
 	echo "At every point, exactly **$REQUESTS requests** are fired at a single key over"
@@ -413,7 +411,7 @@ PRIMARY_NODE="${NODE_COUNTS[0]}"
 	echo "of node count or flush interval. Overshoot = (admitted - $EXPECTED_CEILING) /"
 	echo "$EXPECTED_CEILING, as a percentage."
 	echo
-	echo "This offered load exceeds the ceiling on purpose (same as ticket 08), so most"
+	echo "This offered load exceeds the ceiling on purpose (as in the overshoot harness), so most"
 	echo "requests are denied once the bucket empties. Denial-path latency is cheap and"
 	echo "unrelated to the flush interval (CONTEXT.md), so latency percentiles below are"
 	echo "computed from admitted (allow-path) responses only, decoded from the raw vegeta"
@@ -441,7 +439,7 @@ PRIMARY_NODE="${NODE_COUNTS[0]}"
 
 	echo "## Direction and slope"
 	echo
-	echo "Expectation (ADR-0005, CONTEXT.md): a shorter flush interval reconciles the"
+	echo "Expectation (CONTEXT.md): a shorter flush interval reconciles the"
 	echo "local cache with Redis more often, so it should mean tighter accuracy (smaller"
 	echo "|overshoot|) at the cost of more frequent Redis round-trips — which should show"
 	echo "up as *lower* admitted-path latency being harder to sustain, or as latency rising"
@@ -456,7 +454,7 @@ PRIMARY_NODE="${NODE_COUNTS[0]}"
 		echo "## Investigation"
 		echo
 		printf '%s\n\n' "${CURVE_NOTES[@]}"
-		echo "Per ticket 09, a flat or non-monotonic curve is a finding — it would suggest"
+		echo "A flat or non-monotonic curve is a finding — it would suggest"
 		echo "the overshoot has a floor set by something other than flush timing (e.g. the"
 		echo "burst-then-debt shared-counter behaviour bench/run-overshoot.sh's escalation"
 		echo "check already watches for) — and is reported here rather than smoothed over."

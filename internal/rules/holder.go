@@ -25,7 +25,7 @@ func (holder *EngineHolder) Store(engine *Engine) {
 	holder.engine.Store(engine)
 }
 
-// Check delegates to the currently active engine
+// Check delegates to the currently active engine's Check.
 func (holder *EngineHolder) Check(ctx context.Context, key string, headerValue func(string) string) (Decision, error) {
 	return holder.engine.Load().Check(ctx, key, headerValue)
 }
