@@ -82,8 +82,8 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	globalRedisClient.Close()
-	redisContainer.Terminate(ctx)
+	_ = globalRedisClient.Close()
+	_ = redisContainer.Terminate(ctx)
 
 	os.Exit(code)
 }

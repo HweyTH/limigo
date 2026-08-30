@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+// drain consumes n admits for key, asserting each one succeeds so that a later
+// denial is attributable to the configured limit rather than to an error.
+func drain(t *testing.T, l Limiter, key string, n int) {
+	t.Helper()
+	for i := range n {
+		allowed, err := l.Allow(context.Background(), key)
+		if err != nil {
+			t.Fatalf("drain %q admit %d: unexpected error: %v", key, i+1, err)
+		}
+		if !allowed {
+			t.Fatalf("drain %q admit %d: want allowed within limit", key, i+1)
+		}
+	}
+}
+
 // TestBucketManagerIsolation verifies that separate keys maintain independent
 // token bucket state — exhausting one key's bucket must not affect another.
 func TestBucketManagerIsolation(t *testing.T) {
@@ -20,8 +35,7 @@ func TestBucketManagerIsolation(t *testing.T) {
 	ip1 := "192.168.1.100"
 	ip2 := "10.0.0.5"
 
-	bm.Allow(ctx, ip1)
-	bm.Allow(ctx, ip1)
+	drain(t, bm, ip1, 2)
 
 	allowed, err := bm.Allow(ctx, ip1)
 	if err != nil {
@@ -86,8 +100,7 @@ func TestWindowManagerIsolation(t *testing.T) {
 	ip1 := "192.168.1.100"
 	ip2 := "10.0.0.5"
 
-	wm.Allow(ctx, ip1)
-	wm.Allow(ctx, ip1)
+	drain(t, wm, ip1, 2)
 
 	allowed, err := wm.Allow(ctx, ip1)
 	if err != nil {
@@ -266,8 +279,7 @@ func TestLeakyBucketManagerIsolation(t *testing.T) {
 	ip1 := "192.168.1.100"
 	ip2 := "10.0.0.5"
 
-	lbm.Allow(ctx, ip1)
-	lbm.Allow(ctx, ip1)
+	drain(t, lbm, ip1, 2)
 
 	allowed, err := lbm.Allow(ctx, ip1)
 	if err != nil {
@@ -332,8 +344,7 @@ func TestBatchingFixedWindowManagerIsolation(t *testing.T) {
 	ip1 := "192.168.1.100"
 	ip2 := "10.0.0.5"
 
-	bwm.Allow(ctx, ip1)
-	bwm.Allow(ctx, ip1)
+	drain(t, bwm, ip1, 2)
 
 	allowed, err := bwm.Allow(ctx, ip1)
 	if err != nil {
@@ -430,8 +441,7 @@ func TestBatchingTokenBucketManagerIsolation(t *testing.T) {
 	ip1 := "192.168.1.100"
 	ip2 := "10.0.0.5"
 
-	btm.Allow(ctx, ip1)
-	btm.Allow(ctx, ip1)
+	drain(t, btm, ip1, 2)
 
 	allowed, err := btm.Allow(ctx, ip1)
 	if err != nil {
