@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"sync"
@@ -62,7 +63,15 @@ func init() {
 }
 
 // TestMain provisions the shared Redis container used by store integration tests.
+// Under -short the container is skipped, so the package is runnable where Docker
+// is unavailable.
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if testing.Short() {
+		fmt.Fprintln(os.Stderr, "skipping store integration tests: -short")
+		os.Exit(0)
+	}
+
 	ctx := context.Background()
 
 	// A single Redis container keeps the suite fast while per-test keys preserve isolation.
