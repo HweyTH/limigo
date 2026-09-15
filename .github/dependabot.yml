@@ -1,0 +1,44 @@
+# Dependabot was already opening pull requests for Go modules from account-level
+# settings; nothing in the tree recorded that, and neither the Dockerfiles nor
+# the SHA-pinned actions in .github/workflows/ci.yml were covered. This file
+# makes the coverage explicit. Minor and patch updates are grouped per
+# ecosystem so a busy week is one pull request, not ten.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Dockerfile (golang builder, distroless runtime) and bench/Dockerfile.vegeta
+  # (golang builder, alpine runtime). Both directories are listed because the
+  # docker ecosystem does not recurse.
+  - package-ecosystem: docker
+    directories:
+      - /
+      - /bench
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The CI workflow pins every action to a commit SHA, which is secure but
+  # frozen: without this entry those pins never move again.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
