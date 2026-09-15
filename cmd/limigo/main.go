@@ -33,6 +33,44 @@ type options struct {
 	cacheFlushInterval time.Duration
 }
 
+// serverTimeouts bounds how long an http.Server waits on a client at each
+// stage of a connection. net/http treats a zero as "no timeout", so leaving
+// any of these unset lets a client that sends headers slowly hold a
+// goroutine and a file descriptor indefinitely — the slowloris shape, on a
+// service whose job is to protect other services from abusive traffic.
+type serverTimeouts struct {
+	readHeader time.Duration
+	read       time.Duration
+	write      time.Duration
+	idle       time.Duration
+}
+
+// defaultServerTimeouts applies to both listeners. The header budget closes
+// the slowloris hole; read and write are generous next to the tiny JSON
+// bodies /v1/check exchanges. idle must outlast Traefik's default 90s
+// idleConnTimeout towards backends: if limigo hung up an idle keep-alive
+// first, the proxy would hit closed connections and the load-test harness
+// would start paying reconnection cost for a reason unrelated to the limiter.
+var defaultServerTimeouts = serverTimeouts{
+	readHeader: 5 * time.Second,
+	read:       10 * time.Second,
+	write:      10 * time.Second,
+	idle:       120 * time.Second,
+}
+
+// newServer builds an http.Server with every timeout set, so no listener is
+// ever constructed with the zero-value "wait forever" defaults.
+func newServer(addr string, handler http.Handler, timeouts serverTimeouts) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: timeouts.readHeader,
+		ReadTimeout:       timeouts.read,
+		WriteTimeout:      timeouts.write,
+		IdleTimeout:       timeouts.idle,
+	}
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr); err != nil {
 		logf(os.Stderr, "limigo: %v\n", err)
@@ -103,19 +141,13 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	mux.Handle("/v1/check", api.NewCheckHandler(holder, m))
 	mux.Handle("/healthz", api.NewHealthzHandler())
 
-	server := &http.Server{
-		Addr:    opts.httpAddr,
-		Handler: mux,
-	}
+	server := newServer(opts.httpAddr, mux, defaultServerTimeouts)
 
 	var metricsServer *http.Server
 	if opts.metricsAddr != "" {
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", m.Handler())
-		metricsServer = &http.Server{
-			Addr:    opts.metricsAddr,
-			Handler: metricsMux,
-		}
+		metricsServer = newServer(opts.metricsAddr, metricsMux, defaultServerTimeouts)
 	}
 
 	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr, opts.httpAddr); err != nil {
