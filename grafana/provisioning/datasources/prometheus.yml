@@ -8,3 +8,9 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+    jsonData:
+      # Must match prometheus/prometheus.yml's scrape_interval. Grafana
+      # otherwise assumes 15s, and $__rate_interval (4x the scrape
+      # interval at minimum) becomes 60s: a 60s burst renders as a
+      # triangle instead of a plateau.
+      timeInterval: 5s

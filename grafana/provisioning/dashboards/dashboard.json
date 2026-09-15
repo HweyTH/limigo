@@ -3,7 +3,7 @@
   "uid": "limigo",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "panels": [
@@ -15,8 +15,23 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
-          "expr": "sum by (result) (rate(limigo_requests_total[1m]))",
+          "expr": "sum by (result) (rate(limigo_requests_total[$__rate_interval]))",
           "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "title": "Request rate by node",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (instance) (rate(limigo_requests_total[$__rate_interval]))",
+          "legendFormat": "{{instance}}",
           "refId": "A"
         }
       ],
@@ -27,7 +42,7 @@
       "title": "Fail-closed rate",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "targets": [
         {
           "expr": "sum(rate(limigo_requests_total{result=\"error\"}[5m]))",
@@ -110,7 +125,7 @@
       "title": "Config reload counter",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "targets": [
         {
           "expr": "increase(limigo_config_reload_total[1h])",
