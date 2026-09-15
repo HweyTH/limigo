@@ -15,6 +15,21 @@ and every decision runs as an atomic Lua script, so adding nodes never
 double-spends a client's quota. Four algorithms, hot-reloadable rules, and a
 published measurement of exactly what the accuracy/latency trade-off costs.
 
+## Demo: one node, then three
+
+![300 req/s offered to a 200/s token bucket, first on one Limigo node, then on three. Allowed stays at 200/s; the offered load splits across nodes.](assets/demo/one-node-vs-three-nodes.gif)
+
+300 req/s offered to `burst-tier-token-bucket` (refill 200/s, capacity 1000),
+first against one node, then against three. **Allowed stays at 200/s in both
+phases** — the excess is denied, not double-spent — while the per-node panel
+splits from one line into three. Each phase opens with the same ~10 s burst of
+extra admits: that is the bucket's capacity being spent, and it happens once
+per full bucket, not once per node.
+
+Reproduce it with `bench/run-demo.sh`. It needs only docker: it brings the
+stack up, runs both phases, and leaves everything running so you can watch
+[Grafana](http://localhost:3000/d/limigo) yourself.
+
 ## Why distributed rate limiting is hard
 
 On one machine, a rate limiter is a counter behind a mutex. All of the difficulty
