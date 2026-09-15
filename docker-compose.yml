@@ -13,7 +13,10 @@ services:
   # host ports (they'd collide the moment there's more than one replica) —
   # traefik is the only thing on the host-facing side of the API.
   traefik:
-    image: traefik:v3.1
+    # v3.6 or newer: earlier v3 releases talk Docker API 1.24 to the socket,
+    # which Docker Engine 29+ rejects outright (minimum API 1.40), so the
+    # provider never discovers a single replica and every request 404s.
+    image: traefik:v3.6
     restart: unless-stopped
     command:
       - "--providers.docker=true"
