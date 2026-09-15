@@ -68,7 +68,7 @@ services:
       - "prometheus.scrape=true"
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.14.0
     restart: unless-stopped
     # prom/prometheus drops to a non-root user by default, which can't read
     # the host's docker.sock (root-owned, group-restricted). Needed for
@@ -87,7 +87,7 @@ services:
       - "9090:9090"
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.1
     restart: unless-stopped
     depends_on:
       - prometheus
