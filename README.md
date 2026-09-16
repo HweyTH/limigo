@@ -41,13 +41,17 @@ both read `99`, both admit, both write `100`. The limit is breached and neither
 node did anything wrong. Limigo never issues a `GET` followed by a `SET`. Each
 algorithm's whole decision is a Lua script under
 [`internal/store/lua/`](internal/store/lua/), and Redis runs it atomically, so
-the check and the increment cannot interleave.
+the check and the increment cannot interleave. Each script touches exactly one
+key, which is also what makes it run unmodified on Redis Cluster — see
+[Single-key Lua scripts](#single-key-lua-scripts-deliberately-no-hash-tags).
 
 **Clock skew.** Window boundaries, bucket refills and GCRA schedules all need a
 clock, and separate machines disagree about the time. A node running a second
 fast admits traffic its peers would deny. Limigo's scripts never accept a
 timestamp from the caller; they call `redis.call('TIME')`. There is one clock
-in the system, so there is no skew to reconcile.
+in the system, so there is no skew to reconcile. (Calling `TIME` and then
+writing sets a Redis version floor; see
+[Single-key Lua scripts](#single-key-lua-scripts-deliberately-no-hash-tags).)
 
 **Redis failover.** The shared state is a shared dependency. When Redis is
 unreachable, a limiter must either admit traffic it cannot meter or deny
@@ -282,6 +286,41 @@ caches, so a naive reload would drop admits not yet flushed. Limigo flushes
 the outgoing engine's caches to Redis immediately before the swap. A reload
 never silently drops pending admits; the only accuracy window is the bounded
 one above.
+
+### Single-key Lua scripts, deliberately no hash tags
+
+**Decision.** Every script under [`internal/store/lua/`](internal/store/lua/)
+reads and writes exactly one key, `KEYS[1]`, and never constructs a key name of
+its own. The key prefix `limigo:<rule>:<key>` carries **no hash tag** (`{...}`).
+
+**Why.** Redis Cluster will only run a script whose keys all hash to one slot,
+and it checks that from the declared `KEYS` — so one key per script is
+cluster-safe by construction, with nothing to do at request time. The same
+scripts run unmodified against a single Redis and against a cluster; only the
+client type changes (`-redis-cluster-addrs`).
+
+The tempting move when someone says "make this work on Redis Cluster" is to
+wrap the prefix in a hash tag so related keys land together. Here that would
+be actively wrong. Keys are independent per rule and per caller identity;
+nothing ever needs two of them in one operation. Tagging them would collapse a
+keyspace that shards perfectly across every master onto a single slot, and turn
+a horizontally scalable store into a single-shard bottleneck. Doing nothing is
+the correct design, which is exactly why it is written down: the file that
+rejected hash tags looks identical to the file that never heard of them.
+
+**Consequence.** Multi-key atomic operations are permanently off the table for
+this design. An algorithm that needs two keys touched atomically needs a
+different approach — a single composite key, or a different data model — not a
+hash tag bolted on to make Redis accept the script.
+
+**A second constraint, recorded here because it binds in the same files.** The
+scripts take the clock from the server with `redis.call('TIME')` rather than
+trusting a caller-supplied timestamp; that is the project's answer to clock
+skew across nodes (see [above](#why-distributed-rate-limiting-is-hard)).
+`TIME` is non-deterministic, and a script that writes after calling it is only
+permitted under *effects replication*, which became the default in **Redis 5**
+(Redis 7 removed the older verbatim mode entirely). The minimum supported Redis
+is therefore 5; the compose stack and the integration suite pin `redis:7`.
 
 ## Benchmarks
 
