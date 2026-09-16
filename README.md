@@ -431,7 +431,15 @@ values from 1ms to 1000ms, are at
 and
 [`bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md`](bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md).
 
-### 3. Scaling curve — throughput at 1, 2, 3 nodes
+### 3. Node axis — throughput at 1, 2, 3 nodes, generator-bound
+
+**Read this before the table.** Every row below is produced by a single
+in-network vegeta container pinned to half of an 8-core Apple M2, and that
+generator saturates at roughly the same rate however many Limigo replicas sit
+behind Traefik. §1b rules out Redis: it serves these runs at about 15% of its
+measured capacity for this script. So the table measures the generator's
+limit, not Limigo's, and its flat shape is the expected shape of a bottleneck
+that sits upstream of the thing under test.
 
 `token_bucket`, 10k keys, allow path, through Traefik. Cost is against the
 single-replica through-Traefik ceiling above.
@@ -442,24 +450,41 @@ single-replica through-Traefik ceiling above.
 | 2 | 13,147 | 85.5% of ceiling |
 | 3 | 12,765 | 83.0% of ceiling |
 
-Flat and non-monotonic: adding replicas did **not** add throughput on this
-hardware. The spread between the rows is smaller than the run-to-run variance
-of the measurement (the single-replica `token_bucket` row in §4, same
-configuration, came in at 13,811 in the same suite).
+The spread between rows is smaller than the run-to-run variance of the
+measurement: the single-replica `token_bucket` row in §4, same configuration,
+came in at 13,811 in the same suite.
 
-The bottleneck is the generator. Every row is produced by one in-network
-vegeta container pinned to half of an 8-core Apple M2, and it saturates at
-about the same rate however many replicas sit behind Traefik. §1b rules out
-Redis: it is serving these runs at about 15% of its measured capacity for
-this script.
+**The finding this table supports** is narrower than "throughput scales with
+node count", and it is the one claimed: across 1–3 replicas, **correctness
+held** (≤0.36% overshoot, §2) and **per-request cost did not degrade** under
+the load this generator can produce. Adding nodes did not make the system
+slower or less correct. That is measured and true; a linear-scaling claim from
+this hardware would be neither.
 
-So the claim this table supports is narrower than "throughput scales with
-node count", and the narrower claim is the one made: across 1–3 replicas,
-correctness holds (§2) and per-request cost does not degrade. Showing
-throughput scaling needs load from more than one physical machine, which this
-hardware cannot provide; [issue #5](https://github.com/HweyTH/limigo/issues/5)
-tracks closing that gap honestly rather than re-running the table hoping for
-a different shape.
+**Decision: this axis is closed as generator-bound.** It cannot be reopened on
+this hardware. Two generator containers on the same laptop add contention, not
+load, and the table is not re-run hoping for a different shape. The experiment
+that would settle throughput scaling is specified here so that anyone with the
+hardware can run it:
+
+- **N generator hosts**, physically separate from the host running the stack,
+  each running `vegeta attack` against the same Traefik entry point from
+  `bench/targets/`, with the same rate and duration, writing its own `.bin`.
+- **The service under test isolated** from the generators: Traefik, the Limigo
+  replicas and Redis on a machine that does none of the load generation, so
+  the replicas compete only with each other for cores.
+- **Merged reports**: collect the `.bin` files and run
+  `vegeta report *.bin`, which orders results by timestamp across sources, so
+  the aggregate rate and status histogram come from one merged stream rather
+  than from summing per-host figures.
+- **A control row first**, per CONTEXT.md: the same N generators against
+  `GET /healthz`, so the multi-host ceiling is measured before any Limigo row
+  is read against it.
+- Then the same 1/2/3-replica sweep `bench/run-throughput.sh` performs, and the
+  same overshoot run (§2) alongside it, since correctness is measured next to
+  throughput and never assumed from it.
+
+Until that runs, the node-axis claim stays at the narrower, measured one above.
 
 ### 4. Algorithm comparison — uncached, 10k keys, in-network
 
@@ -590,7 +615,7 @@ All numbers above were measured on:
 - Go: 1.27.0
 
 ```bash
-bench/run-throughput.sh   # §1, §1b, §3, §4, §5: control rows, Redis bound, algorithm axis, scaling curve, cached-vs-uncached
+bench/run-throughput.sh   # §1, §1b, §3, §4, §5: control rows, Redis bound, node axis, algorithm axis, cached-vs-uncached
 bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: overshoot / consistency
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
 bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat

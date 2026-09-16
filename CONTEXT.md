@@ -77,8 +77,14 @@ itself a reported finding, not noise to be discarded.
 two points, 1 key and 10k keys, never blended: 1 key measures contention on a
 single bucket, 10k measures map growth and Redis keyspace behaviour.
 
-**Scaling curve** — throughput and overshoot measured at 1, 2, and 3 replicas.
-Replaces the flat "50k req/s" claim.
+**Node axis** — throughput and overshoot measured at 1, 2, and 3 replicas.
+Replaces the flat "50k req/s" claim. Formerly "scaling curve"; renamed when
+the throughput half was closed as **generator-bound** (README §3): on this
+hardware one generator saturates at the same rate however many replicas sit
+behind it, so the table measures the generator, not Limigo. The claim the axis
+supports is that adding nodes does not degrade correctness or per-request
+cost — not that throughput scales. Reopening it needs load from several
+physical hosts; the experiment is specified in README §3.
 
 ---
 
