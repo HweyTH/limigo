@@ -447,6 +447,36 @@ healthy. The opposite default is correct where Limigo is an optional layer and
 policy off `matched: false`, which the response carries for exactly this
 reason, rather than off `allowed`.
 
+### Nothing is importable, on purpose
+
+**Decision.** Every package lives under `internal/`. There is no public Go
+API, `pkg.go.dev` shows the module with no importable packages, and there is
+no Go Reference badge above, because it would link to a page that says so.
+
+**The alternative.** `internal/limiter` is genuinely reusable on its own: four
+correct, concurrency-safe, table-tested algorithm implementations behind a
+one-method interface, usable in-process with no Redis at all. Exporting it
+would give the project a second audience.
+
+**Why not.** A public Go package is a compatibility promise. Under semantic
+import versioning, every exported name — `NewBucketManager(capacity, rate
+float64)`, `NewLeakyBucket(limit, window, burst)`, the `Limiter` interface
+itself — becomes something that cannot change without a major version. The
+batching types are the sharpest edge: `BatchingTokenBucket` exposes
+`PendingDelta`, `ApplyRemoteTotal`, `Admit` and `Exhausted`, which are not a
+general-purpose API but the specific contract `internal/rules` drives from its
+flush cycle. Freezing those would freeze an internal collaboration that is
+still being shaped by measurement. Publishing an API and then breaking it is
+worse than never publishing one, so at `v0.1.0` Limigo is a service, not a
+library.
+
+**When to reverse it.** If the algorithm layer's signatures survive a few
+releases untouched and someone outside this repository wants them, the move is
+mechanical: a top-level `limiter/` package exporting the plain algorithms
+only, runnable `Example` functions, and the compatibility promise stated in
+the package doc. The batching types stay internal until their contract has
+settled.
+
 ## Benchmarks
 
 Every number below was measured on this project's own hardware and is
