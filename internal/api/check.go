@@ -44,7 +44,15 @@ type checkResponse struct {
 // recorder is notified of every completed check's outcome; malformed
 // requests that never reach engine (bad method, bad body, empty key) are not
 // recorded, since they are not rate-limit decisions.
-func NewCheckHandler(engine Checker, recorder RequestRecorder) http.Handler {
+//
+// checkTimeout bounds each call into engine. The server's WriteTimeout does
+// not cancel the request context, so without this a store whose Redis has
+// hung is bounded only by the client library's own retries — which can run
+// past WriteTimeout, at which point the fail-closed 503 can no longer be
+// written and the client sees a reset instead. The deadline must be shorter
+// than WriteTimeout, and engine must honour context cancellation for it to
+// bite (RedisStore does: main enables go-redis's context timeouts).
+func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -64,7 +72,9 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder) http.Handler {
 			return
 		}
 
-		decision, err := engine.Check(r.Context(), key, r.Header.Get)
+		ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
+		defer cancel()
+		decision, err := engine.Check(ctx, key, r.Header.Get)
 		switch {
 		case err != nil:
 			recorder.RecordRequest(decision.RuleName, "error")

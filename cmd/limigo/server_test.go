@@ -96,3 +96,15 @@ func TestDefaultServerTimeouts(t *testing.T) {
 		t.Fatalf("IdleTimeout = %s, want > 90s so limigo never closes an idle keep-alive before Traefik does", srv.IdleTimeout)
 	}
 }
+
+// TestDefaultCheckTimeoutInsideWriteTimeout pins the ordering the check
+// deadline exists for: the store call must give up before the server stops
+// being able to write the 503, with room left for the write itself.
+func TestDefaultCheckTimeoutInsideWriteTimeout(t *testing.T) {
+	if defaultCheckTimeout <= 0 {
+		t.Fatalf("defaultCheckTimeout = %s, want > 0", defaultCheckTimeout)
+	}
+	if defaultCheckTimeout >= defaultServerTimeouts.write {
+		t.Fatalf("defaultCheckTimeout %s is not inside WriteTimeout %s; a hung store would reset the connection instead of returning 503", defaultCheckTimeout, defaultServerTimeouts.write)
+	}
+}

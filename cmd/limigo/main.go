@@ -63,6 +63,12 @@ var defaultServerTimeouts = serverTimeouts{
 	idle:       120 * time.Second,
 }
 
+// defaultCheckTimeout bounds the store call behind every /v1/check. It must
+// sit inside defaultServerTimeouts.write with room for the response itself:
+// once WriteTimeout has passed, the fail-closed 503 cannot be written and a
+// hung Redis surfaces as a connection reset that no metric ever sees.
+const defaultCheckTimeout = 5 * time.Second
+
 // newServer builds an http.Server with every timeout set, so no listener is
 // ever constructed with the zero-value "wait forever" defaults.
 func newServer(addr string, handler http.Handler, timeouts serverTimeouts) *http.Server {
@@ -141,7 +147,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	holder := rules.NewEngineHolder(engine)
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/check", api.NewCheckHandler(holder, m))
+	mux.Handle("/v1/check", api.NewCheckHandler(holder, m, defaultCheckTimeout))
 	mux.Handle("/healthz", api.NewHealthzHandler())
 
 	server := newServer(opts.httpAddr, mux, defaultServerTimeouts)
@@ -273,14 +279,21 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 // at redisAddr. target describes the choice for log lines. Both client types
 // satisfy redis.Scripter, which is all store.RedisStore needs — the Lua
 // scripts are single-key and run unmodified on a cluster.
+//
+// ContextTimeoutEnabled is on for both: by default go-redis ignores the
+// context's deadline for dial and read and applies only its own timeouts,
+// across retries, so the per-request deadline /v1/check derives would not
+// reach the socket. With it on, that deadline bounds the whole round-trip.
 func newRedisClient(opts options) (client goredis.UniversalClient, target string) {
 	if len(opts.redisClusterAddrs) > 0 {
 		return goredis.NewClusterClient(&goredis.ClusterOptions{
-			Addrs: opts.redisClusterAddrs,
+			Addrs:                 opts.redisClusterAddrs,
+			ContextTimeoutEnabled: true,
 		}), fmt.Sprintf("cluster %s", strings.Join(opts.redisClusterAddrs, ","))
 	}
 	return goredis.NewClient(&goredis.Options{
-		Addr: opts.redisAddr,
+		Addr:                  opts.redisAddr,
+		ContextTimeoutEnabled: true,
 	}), fmt.Sprintf("address %s", opts.redisAddr)
 }
 

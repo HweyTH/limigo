@@ -215,7 +215,7 @@ func TestNewCheckHandlerRecordsRequestOutcome(t *testing.T) {
 			request.Header.Set("X-Plan", "free")
 			responseRecorder := httptest.NewRecorder()
 
-			NewCheckHandler(checker, requestRecorder).ServeHTTP(responseRecorder, request)
+			NewCheckHandler(checker, requestRecorder, testCheckTimeout).ServeHTTP(responseRecorder, request)
 
 			if len(requestRecorder.calls) != 1 {
 				t.Fatalf("RecordRequest calls = %d, want 1", len(requestRecorder.calls))
@@ -234,12 +234,70 @@ func TestNewCheckHandlerRecordsRequestOutcome(t *testing.T) {
 		request.Header.Set("X-Plan", "free")
 		responseRecorder := httptest.NewRecorder()
 
-		NewCheckHandler(checker, requestRecorder).ServeHTTP(responseRecorder, request)
+		NewCheckHandler(checker, requestRecorder, testCheckTimeout).ServeHTTP(responseRecorder, request)
 
 		if len(requestRecorder.calls) != 0 {
 			t.Fatalf("RecordRequest calls = %d, want 0 for a malformed request", len(requestRecorder.calls))
 		}
 	})
+}
+
+// testCheckTimeout is generous for the ordinary tests, which never block:
+// they need a deadline on the request context but must not race against it.
+const testCheckTimeout = 5 * time.Second
+
+// blockingChecker is a Checker double standing in for a store whose Redis
+// has gone away: it never answers on its own and returns only when the
+// request context ends, with that context's error — the same shape go-redis
+// produces once the client honours context deadlines.
+type blockingChecker struct{}
+
+func (blockingChecker) Check(ctx context.Context, key string, headerValue func(string) string) (rules.Decision, error) {
+	<-ctx.Done()
+	return rules.Decision{Matched: true, RuleName: "free-tier"}, ctx.Err()
+}
+
+// TestNewCheckHandlerBoundsStoreCallWithDeadline is the hung-Redis case:
+// the handler must derive a per-request deadline so a store that blocks
+// past it yields the fail-closed 503 inside that deadline, recorded as an
+// error, rather than a response that the server's WriteTimeout later turns
+// into a connection reset.
+func TestNewCheckHandlerBoundsStoreCallWithDeadline(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "50ms", timeout: 50 * time.Millisecond},
+		{name: "200ms", timeout: 200 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestRecorder := &fakeRequestRecorder{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/check", strings.NewReader(`{"key":"user-123"}`))
+			request.Header.Set("X-Plan", "free")
+			responseRecorder := httptest.NewRecorder()
+
+			start := time.Now()
+			NewCheckHandler(blockingChecker{}, requestRecorder, tt.timeout).ServeHTTP(responseRecorder, request)
+			elapsed := time.Since(start)
+
+			// Well inside the 10s WriteTimeout the deadline exists to beat, and
+			// far enough past tt.timeout to absorb scheduler jitter without
+			// flaking; the point is bounded, not exact.
+			if elapsed > tt.timeout+time.Second {
+				t.Fatalf("handler took %s, want within %s of the %s deadline", elapsed, time.Second, tt.timeout)
+			}
+			assertStatus(t, responseRecorder, http.StatusServiceUnavailable)
+			response := decodeCheckResponse(t, responseRecorder)
+			assertResponse(t, response, checkResponse{Allowed: false, Matched: true, Rule: "free-tier"})
+			if len(requestRecorder.calls) != 1 {
+				t.Fatalf("RecordRequest calls = %d, want 1", len(requestRecorder.calls))
+			}
+			if got := requestRecorder.calls[0]; got.rule != "free-tier" || got.result != "error" {
+				t.Fatalf("RecordRequest(%q, %q), want RecordRequest(%q, %q)", got.rule, got.result, "free-tier", "error")
+			}
+		})
+	}
 }
 
 func serveCheckRequest(t *testing.T, checker *fakeChecker, method string, body string, plan string) *httptest.ResponseRecorder {
@@ -249,7 +307,7 @@ func serveCheckRequest(t *testing.T, checker *fakeChecker, method string, body s
 	request.Header.Set("X-Plan", plan)
 	recorder := httptest.NewRecorder()
 
-	NewCheckHandler(checker, &fakeRequestRecorder{}).ServeHTTP(recorder, request)
+	NewCheckHandler(checker, &fakeRequestRecorder{}, testCheckTimeout).ServeHTTP(recorder, request)
 	return recorder
 }
 

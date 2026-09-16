@@ -86,21 +86,29 @@ func TestNewRedisClientSelectsType(t *testing.T) {
 	t.Run("standalone", func(t *testing.T) {
 		client, target := newRedisClient(options{redisAddr: "localhost:6379"})
 		t.Cleanup(func() { _ = client.Close() })
-		if _, ok := client.(*goredis.Client); !ok {
+		standalone, ok := client.(*goredis.Client)
+		if !ok {
 			t.Fatalf("client type = %T, want *redis.Client", client)
 		}
 		if target != "address localhost:6379" {
 			t.Errorf("target = %q", target)
 		}
+		if !standalone.Options().ContextTimeoutEnabled {
+			t.Error("ContextTimeoutEnabled = false; the /v1/check deadline would never reach the socket")
+		}
 	})
 	t.Run("cluster", func(t *testing.T) {
 		client, target := newRedisClient(options{redisAddr: "localhost:6379", redisClusterAddrs: []string{"a:7000", "b:7001"}})
 		t.Cleanup(func() { _ = client.Close() })
-		if _, ok := client.(*goredis.ClusterClient); !ok {
+		cluster, ok := client.(*goredis.ClusterClient)
+		if !ok {
 			t.Fatalf("client type = %T, want *redis.ClusterClient", client)
 		}
 		if target != "cluster a:7000,b:7001" {
 			t.Errorf("target = %q", target)
+		}
+		if !cluster.Options().ContextTimeoutEnabled {
+			t.Error("ContextTimeoutEnabled = false; the /v1/check deadline would never reach the socket")
 		}
 	})
 }
