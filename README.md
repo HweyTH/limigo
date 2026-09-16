@@ -99,6 +99,17 @@ Rules match in configuration order, first match wins. When the config file
 changes on disk the whole rule set is recompiled and swapped atomically — no
 restart, no dropped requests.
 
+Each node exposes two health endpoints with different jobs. `GET /healthz` is
+**liveness** — a static 200 that touches nothing, which is also what makes it
+the control endpoint every benchmark's ceiling is measured against. `GET
+/readyz` is **readiness**: 200 while the node will take new work, 503 from the
+moment shutdown begins. On `SIGTERM` a node fails `/readyz` first, keeps
+serving for `-drain-delay` so Traefik's next health check routes new requests
+to its peers, and only then closes its listener and drains what is in flight.
+Readiness deliberately does not probe Redis: a store outage already shows as
+fail-closed 503s per rule, and failing readiness on it too would pull every
+node out of the pool at once with less to show for it.
+
 ## Rate limiting algorithms
 
 Four algorithms behind one interface, each with a different trade-off between
@@ -678,6 +689,7 @@ bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: ov
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
 bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat
 bench/run-outage.sh       # failure mode: kill and restart Redis under load, per-second timeline for both arms
+bench/run-rolling-restart.sh  # readiness: restart replicas one at a time under load, count dropped requests
 ```
 
 `bench/run-microbench.sh` needs `benchstat` on `PATH`
@@ -781,6 +793,7 @@ default. Both are configurable by flag or environment variable:
 | `-http-addr` | `LIMIGO_HTTP_ADDR` | `:8080` | API listen address |
 | `-metrics-addr` | `LIMIGO_METRICS_ADDR` | `:9091` | Prometheus `/metrics` listen address; set empty to disable |
 | `-shutdown-timeout` | `LIMIGO_SHUTDOWN_TIMEOUT` | `10s` | max time to drain in-flight requests on `SIGTERM` |
+| `-drain-delay` | `LIMIGO_DRAIN_DELAY` | `6s` | on `SIGTERM`, how long to keep serving after `/readyz` starts returning 503, so the load balancer's next health check routes new requests elsewhere; cover one check interval |
 | `-cache-flush-interval` | `LIMIGO_CACHE_FLUSH_INTERVAL` | `10ms` | how often `local_cache: true` rules sync to Redis |
 
 Write your own rules by copying `config.example.yaml`; the

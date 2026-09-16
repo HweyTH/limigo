@@ -51,17 +51,29 @@ services:
       # compose up` to sweep the accuracy/latency knob (CONTEXT.md: flush
       # interval).
       LIMIGO_CACHE_FLUSH_INTERVAL: ${LIMIGO_CACHE_FLUSH_INTERVAL:-}
+    # Docker's own check is liveness (/healthz: is the process up), which is
+    # what `--wait` and depends_on gate on. Traefik's check below is
+    # readiness (/readyz), which a draining replica fails on purpose.
     healthcheck:
       test: ["CMD", "./healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 5
+    # On SIGTERM a replica fails /readyz, keeps serving for --drain-delay
+    # (6s, one Traefik check interval plus slack) so the proxy stops routing
+    # to it, then drains in-flight requests for up to --shutdown-timeout
+    # (10s). Docker's default 10s grace would SIGKILL it mid-drain.
+    stop_grace_period: 20s
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.limigo.rule=PathPrefix(`/`)"
       - "traefik.http.routers.limigo.entrypoints=web"
       - "traefik.http.services.limigo.loadbalancer.server.port=8080"
-      - "traefik.http.services.limigo.loadbalancer.healthcheck.path=/healthz"
+      # Readiness, not liveness: a replica that has begun shutting down
+      # answers 503 here so Traefik routes new requests to its peers while
+      # it finishes the ones in flight. /healthz stays the control endpoint
+      # for benchmarks and must not gain readiness logic (internal/api/healthz.go).
+      - "traefik.http.services.limigo.loadbalancer.healthcheck.path=/readyz"
       - "traefik.http.services.limigo.loadbalancer.healthcheck.interval=5s"
       # Discovery hint for Prometheus's docker_sd_configs (see
       # prometheus/prometheus.yml) — not read by traefik.

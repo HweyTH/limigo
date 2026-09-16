@@ -36,6 +36,10 @@ type options struct {
 	metricsAddr        string
 	shutdownTimeout    time.Duration
 	cacheFlushInterval time.Duration
+	// drainDelay is how long the node keeps serving after failing /readyz and
+	// before it stops accepting connections: the window in which the proxy's
+	// next health check observes the 503 and routes new requests elsewhere.
+	drainDelay time.Duration
 }
 
 // serverTimeouts bounds how long an http.Server waits on a client at each
@@ -68,6 +72,18 @@ var defaultServerTimeouts = serverTimeouts{
 // once WriteTimeout has passed, the fail-closed 503 cannot be written and a
 // hung Redis surfaces as a connection reset that no metric ever sees.
 const defaultCheckTimeout = 5 * time.Second
+
+// drainThenShutdown is the shutdown ordering that makes /readyz mean
+// something: fail readiness first, keep serving for drainDelay so the proxy's
+// next health check sees the 503 and stops sending new work here, and only
+// then stop accepting connections and drain what is in flight. Without the
+// wait the endpoint exists but changes nothing — the proxy would still be
+// routing to this node at the moment it closed its listener.
+func drainThenShutdown(readiness *api.Readiness, drainDelay time.Duration, shutdown func() error) error {
+	readiness.Draining()
+	time.Sleep(drainDelay)
+	return shutdown()
+}
 
 // newServer builds an http.Server with every timeout set, so no listener is
 // ever constructed with the zero-value "wait forever" defaults.
@@ -145,10 +161,12 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	}
 
 	holder := rules.NewEngineHolder(engine)
+	readiness := api.NewReadiness()
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/check", api.NewCheckHandler(holder, m, defaultCheckTimeout))
 	mux.Handle("/healthz", api.NewHealthzHandler())
+	mux.Handle("/readyz", readiness.Handler())
 
 	server := newServer(opts.httpAddr, mux, defaultServerTimeouts)
 
@@ -229,6 +247,11 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		}()
 	}
 
+	// The listener binds inside ListenAndServe, a few microseconds after this
+	// line; a health check that lands in that gap gets a refused connection,
+	// which reads as not-ready anyway.
+	readiness.Ready()
+
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -241,13 +264,21 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		}
 		return nil
 	case <-ctx.Done():
-		if _, err := fmt.Fprintf(stdout, "received shutdown signal, draining in-flight requests (timeout %s)...\n", opts.shutdownTimeout); err != nil {
+		if _, err := fmt.Fprintf(stdout, "received shutdown signal, failing readiness and serving for %s before draining in-flight requests (timeout %s)...\n", opts.drainDelay, opts.shutdownTimeout); err != nil {
 			return fmt.Errorf("write shutdown notice: %w", err)
 		}
 
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), opts.shutdownTimeout)
+		// The drain delay is not charged against the shutdown timeout: the
+		// timeout bounds the drain of in-flight requests, which only starts
+		// once the listener closes.
+		var shutdownCtx context.Context
+		var shutdownCancel context.CancelFunc
+		err := drainThenShutdown(readiness, opts.drainDelay, func() error {
+			shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), opts.shutdownTimeout)
+			return server.Shutdown(shutdownCtx)
+		})
 		defer shutdownCancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
+		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
 				return fmt.Errorf("graceful shutdown timed out after %s: %w", opts.shutdownTimeout, err)
 			}
@@ -304,6 +335,9 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	flags.SetOutput(stderr)
 	flags.DurationVar(&opts.shutdownTimeout, "shutdown-timeout", envDurationOrDefault(getenv, "LIMIGO_SHUTDOWN_TIMEOUT", 10*time.Second), "max time to wait for in-flight requests to finish on shutdown")
 	flags.DurationVar(&opts.cacheFlushInterval, "cache-flush-interval", envDurationOrDefault(getenv, "LIMIGO_CACHE_FLUSH_INTERVAL", 10*time.Millisecond), "how often to reconcile local_cache rules with the backing store")
+	// Default covers one Traefik health-check interval (5s in
+	// docker-compose.yml) with a second to spare for the check itself.
+	flags.DurationVar(&opts.drainDelay, "drain-delay", envDurationOrDefault(getenv, "LIMIGO_DRAIN_DELAY", 6*time.Second), "how long to keep serving after failing /readyz before closing the listener; cover one load-balancer health-check interval")
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
 	// redisAddr keeps a default so the common single-node case needs no flag;
 	// that means "was it set?" cannot be read off the value alone. redisAddrSet
@@ -354,6 +388,9 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	}
 	if opts.cacheFlushInterval <= 0 {
 		return opts, fmt.Errorf("cache flush interval must be greater than zero")
+	}
+	if opts.drainDelay < 0 {
+		return opts, fmt.Errorf("drain delay must not be negative")
 	}
 	return opts, nil
 }
