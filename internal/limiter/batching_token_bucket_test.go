@@ -228,3 +228,47 @@ func TestBatchingTokenBucketExhausted(t *testing.T) {
 		})
 	}
 }
+
+// TestBatchingTokenBucketAdmitRemaining verifies Admit reports the local
+// whole tokens remaining after each decision: counting down from capacity,
+// floored when a flush reports a fractional count, and clamped at zero when
+// a flush reports the fleet over-admitted.
+func TestBatchingTokenBucketAdmitRemaining(t *testing.T) {
+	tb := NewBatchingTokenBucket(3, 1)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		before        func()
+		wantAllowed   bool
+		wantRemaining int64
+	}{
+		{name: "first admit", wantAllowed: true, wantRemaining: 2},
+		{name: "second admit", wantAllowed: true, wantRemaining: 1},
+		{name: "third admit exhausts", wantAllowed: true, wantRemaining: 0},
+		{name: "denied stays at zero", wantAllowed: false, wantRemaining: 0},
+		{
+			name:          "fractional remote count is floored",
+			before:        func() { tb.ApplyRemoteTotal(3, 2.9) },
+			wantAllowed:   true,
+			wantRemaining: 1,
+		},
+		{
+			name:          "negative remote count clamps at zero",
+			before:        func() { tb.ApplyRemoteTotal(1, -4) },
+			wantAllowed:   false,
+			wantRemaining: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.before != nil {
+				tt.before()
+			}
+			allowed, remaining := tb.Admit(ctx, "key")
+			if allowed != tt.wantAllowed || remaining != tt.wantRemaining {
+				t.Fatalf("Admit = (%v, %d), want (%v, %d)", allowed, remaining, tt.wantAllowed, tt.wantRemaining)
+			}
+		})
+	}
+}

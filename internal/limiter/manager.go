@@ -160,20 +160,27 @@ func NewBatchingFixedWindowManager(limit int64) *BatchingFixedWindowManager {
 // be throttled. A window is created for the key if one does not already exist.
 // It uses double-checked locking to minimise contention on the common path.
 func (manager *BatchingFixedWindowManager) Allow(ctx context.Context, key string) (bool, error) {
+	allowed, _ := manager.Admit(ctx, key)
+	return allowed, nil
+}
+
+// Admit is Allow with the key's local remaining quota after the decision;
+// see BatchingFixedWindow.Admit.
+func (manager *BatchingFixedWindowManager) Admit(ctx context.Context, key string) (allowed bool, remaining int64) {
 	manager.mu.RLock()
 	w, exists := manager.windows[key]
 	manager.mu.RUnlock()
 	if exists {
-		return w.Allow(ctx, key)
+		return w.Admit(ctx, key)
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if w, exists := manager.windows[key]; !exists {
 		newWindow := NewBatchingFixedWindow(manager.limit)
 		manager.windows[key] = newWindow
-		return newWindow.Allow(ctx, key)
+		return newWindow.Admit(ctx, key)
 	} else {
-		return w.Allow(ctx, key)
+		return w.Admit(ctx, key)
 	}
 }
 
@@ -212,20 +219,27 @@ func NewBatchingTokenBucketManager(capacity, rate float64) *BatchingTokenBucketM
 // be throttled. A bucket is created for the key if one does not already exist.
 // It uses double-checked locking to minimise contention on the common path.
 func (manager *BatchingTokenBucketManager) Allow(ctx context.Context, key string) (bool, error) {
+	allowed, _ := manager.Admit(ctx, key)
+	return allowed, nil
+}
+
+// Admit is Allow with the key's local remaining whole tokens after the
+// decision; see BatchingTokenBucket.Admit.
+func (manager *BatchingTokenBucketManager) Admit(ctx context.Context, key string) (allowed bool, remaining int64) {
 	manager.mu.RLock()
 	bucket, exists := manager.buckets[key]
 	manager.mu.RUnlock()
 	if exists {
-		return bucket.Allow(ctx, key)
+		return bucket.Admit(ctx, key)
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if bucket, exists := manager.buckets[key]; !exists {
 		newBucket := NewBatchingTokenBucket(manager.capacity, manager.rate)
 		manager.buckets[key] = newBucket
-		return newBucket.Allow(ctx, key)
+		return newBucket.Admit(ctx, key)
 	} else {
-		return bucket.Allow(ctx, key)
+		return bucket.Admit(ctx, key)
 	}
 }
 

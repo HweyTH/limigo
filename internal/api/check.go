@@ -87,6 +87,7 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time
 		}
 
 		if err != nil {
+			setRateLimitPolicyHeader(w, decision)
 			setRetryAfterHeader(w, decision.RetryAfter)
 			writeJSON(w, http.StatusServiceUnavailable, checkResponse{
 				Allowed:      false,
@@ -102,6 +103,8 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time
 			status = http.StatusTooManyRequests
 		}
 
+		setRateLimitPolicyHeader(w, decision)
+		setRateLimitHeader(w, decision)
 		setRetryAfterHeader(w, decision.RetryAfter)
 		writeJSON(w, status, checkResponse{
 			Allowed:      decision.Allowed,
@@ -110,6 +113,61 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time
 			RetryAfterMs: decision.RetryAfter.Milliseconds(),
 		})
 	})
+}
+
+// setRateLimitPolicyHeader sets the IETF RateLimit-Policy field
+// (draft-ietf-httpapi-ratelimit-headers-11, section 4): the matched rule's
+// static quota as a Structured Field Dictionary keyed by policy name, with
+// q the quota in requests and w the window in whole seconds. It is a no-op
+// when no rule matched. w is omitted for a token bucket, which has no
+// window, and for a window under one second, which the field cannot express
+// (w is a non-zero integer of seconds) and which rounding up would misstate.
+func setRateLimitPolicyHeader(w http.ResponseWriter, decision rules.Decision) {
+	if !decision.Matched {
+		return
+	}
+	value := sfString(decision.RuleName) + ";q=" + strconv.FormatInt(decision.Limit, 10)
+	if decision.Window >= time.Second {
+		value += ";w=" + strconv.FormatInt(int64(math.Ceil(decision.Window.Seconds())), 10)
+	}
+	w.Header().Set("RateLimit-Policy", value)
+}
+
+// setRateLimitHeader sets the IETF RateLimit field
+// (draft-ietf-httpapi-ratelimit-headers-11, section 5): the matched rule's
+// current quota state, keyed by the same policy name as RateLimit-Policy,
+// with r the remaining requests and t the seconds until the quota is fully
+// restored, rounded up like Retry-After so a client never assumes quota
+// before it exists. It is a no-op when no rule matched. t is omitted when
+// the reset is unknown, which is the case for a locally cached rule; r is
+// then this node's local view, not the fleet's (see rules.Decision.Remaining).
+func setRateLimitHeader(w http.ResponseWriter, decision rules.Decision) {
+	if !decision.Matched {
+		return
+	}
+	value := sfString(decision.RuleName) + ";r=" + strconv.FormatInt(decision.Remaining, 10)
+	if decision.Reset > 0 {
+		value += ";t=" + strconv.FormatInt(int64(math.Ceil(decision.Reset.Seconds())), 10)
+	}
+	w.Header().Set("RateLimit", value)
+}
+
+// sfString quotes s as an RFC 9651 Structured Field String. Config validation
+// already restricts rule names to printable ASCII without the two characters
+// sf-string escapes, so the escaping here is belt and braces, not a path the
+// service expects to take.
+func sfString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == '"' || c == '\\' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // setRetryAfterHeader sets the standard Retry-After header, rounded up to

@@ -108,11 +108,11 @@ func TestAllowFixedWindow(t *testing.T) {
 		key := redisTestKey(t, "happy")
 
 		for i := range limit {
-			allowed, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
+			verdict, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on call %d: %v", i+1, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected call %d to be allowed", i+1)
 			}
 		}
@@ -124,20 +124,20 @@ func TestAllowFixedWindow(t *testing.T) {
 		key := redisTestKey(t, "over-limit")
 
 		for i := range limit {
-			allowed, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
+			verdict, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on setup call %d: %v", i+1, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected setup call %d to be allowed", i+1)
 			}
 		}
 
-		allowed, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
+		verdict, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
 		if err != nil {
 			t.Fatalf("unexpected error on deny call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Error("expected request to be denied after limit exceeded")
 		}
 	})
@@ -146,11 +146,11 @@ func TestAllowFixedWindow(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		allowed, err := store.AllowFixedWindow(canceledCtx, redisTestKey(t, "canceled"), 1, time.Second)
+		verdict, err := store.AllowFixedWindow(canceledCtx, redisTestKey(t, "canceled"), 1, time.Second)
 		if err == nil {
 			t.Fatal("expected context cancellation error, got nil")
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected canceled request to fail closed")
 		}
 	})
@@ -158,19 +158,19 @@ func TestAllowFixedWindow(t *testing.T) {
 	t.Run("EdgeCaseLimitOneAllowsOnlyFirstRequest", func(t *testing.T) {
 		key := redisTestKey(t, "limit-one")
 
-		allowed, err := store.AllowFixedWindow(ctx, key, 1, time.Second)
+		verdict, err := store.AllowFixedWindow(ctx, key, 1, time.Second)
 		if err != nil {
 			t.Fatalf("unexpected error on first call: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first request to be allowed when limit is one")
 		}
 
-		allowed, err = store.AllowFixedWindow(ctx, key, 1, time.Second)
+		verdict, err = store.AllowFixedWindow(ctx, key, 1, time.Second)
 		if err != nil {
 			t.Fatalf("unexpected error on second call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected second request to be denied when limit is one")
 		}
 	})
@@ -179,11 +179,11 @@ func TestAllowFixedWindow(t *testing.T) {
 		key := redisTestKey(t, "zero-limit")
 
 		for i := range 3 {
-			allowed, err := store.AllowFixedWindow(ctx, key, 0, time.Second)
+			verdict, err := store.AllowFixedWindow(ctx, key, 0, time.Second)
 			if err != nil {
 				t.Fatalf("unexpected error on call %d: %v", i+1, err)
 			}
-			if allowed {
+			if verdict.Allowed {
 				t.Fatalf("expected call %d to be denied when limit is zero", i+1)
 			}
 		}
@@ -195,20 +195,20 @@ func TestAllowFixedWindow(t *testing.T) {
 		key := redisTestKey(t, "expiration")
 
 		for i := range limit {
-			allowed, err := store.AllowFixedWindow(ctx, key, limit, window)
+			verdict, err := store.AllowFixedWindow(ctx, key, limit, window)
 			if err != nil {
 				t.Fatalf("unexpected error on setup call %d: %v", i+1, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected setup call %d to be allowed", i+1)
 			}
 		}
 
-		allowed, err := store.AllowFixedWindow(ctx, key, limit, window)
+		verdict, err := store.AllowFixedWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on over-limit call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected request to be denied before the window expires")
 		}
 
@@ -232,11 +232,11 @@ func TestAllowFixedWindow(t *testing.T) {
 			t.Fatalf("expected fixed-window key to expire, got TTL %s", ttl)
 		}
 
-		allowed, err = store.AllowFixedWindow(ctx, key, limit, window)
+		verdict, err = store.AllowFixedWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error after window reset: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected request to be allowed after the window expires")
 		}
 	})
@@ -253,12 +253,12 @@ func TestAllowFixedWindow(t *testing.T) {
 			key := redisTestKey(t, ip)
 
 			wg.Go(func() {
-				allowed, err := store.AllowFixedWindow(ctx, key, limit, window)
+				verdict, err := store.AllowFixedWindow(ctx, key, limit, window)
 				if err != nil {
 					t.Errorf("unexpected error for key %q: %v", key, err)
 					return
 				}
-				if allowed {
+				if verdict.Allowed {
 					allowedCount.Add(1)
 				}
 			})
@@ -280,11 +280,11 @@ func TestAllowFixedWindow(t *testing.T) {
 
 		for range workers {
 			wg.Go(func() {
-				allowed, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
+				verdict, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
 				if err != nil {
 					t.Errorf("unexpected error: %v", err)
 				}
-				if allowed {
+				if verdict.Allowed {
 					count.Add(1)
 				}
 			})
@@ -304,11 +304,11 @@ func TestAllowFixedWindow(t *testing.T) {
 		var deniedCount int
 
 		for i := range totalRequests {
-			allowed, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
+			verdict, err := store.AllowFixedWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on call %d: %v", i+1, err)
 			}
-			if allowed {
+			if verdict.Allowed {
 				allowedCount++
 			} else {
 				deniedCount++
@@ -335,11 +335,11 @@ func TestAllowSlidingWindow(t *testing.T) {
 		key := redisTestKey(t, "happy")
 
 		for i := range limit {
-			allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
+			verdict, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on call %d: %v", i+1, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected call %d to be allowed", i+1)
 			}
 		}
@@ -351,20 +351,20 @@ func TestAllowSlidingWindow(t *testing.T) {
 		key := redisTestKey(t, "over-limit")
 
 		for i := range limit {
-			allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
+			verdict, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
 			if err != nil {
 				t.Fatalf("unexpected error on setup call %d: %v", i+1, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected setup call %d to be allowed", i+1)
 			}
 		}
 
-		allowed, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
+		verdict, err := store.AllowSlidingWindow(ctx, key, int64(limit), window)
 		if err != nil {
 			t.Fatalf("unexpected error on deny call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Error("expected request to be denied after limit exceeded")
 		}
 	})
@@ -374,39 +374,39 @@ func TestAllowSlidingWindow(t *testing.T) {
 		window := 100 * time.Millisecond
 		key := redisTestKey(t, "oldest-expires")
 
-		allowed, err := store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err := store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 1, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected setup call %d to be allowed", 1)
 		}
 
 		time.Sleep(60 * time.Millisecond)
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 2, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected setup call %d to be allowed", 2)
 		}
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 3, err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected setup call %d to be denied", 3)
 		}
 
 		time.Sleep(60 * time.Millisecond)
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 4, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected setup call %d to be allowed", 4)
 		}
 	})
@@ -416,47 +416,47 @@ func TestAllowSlidingWindow(t *testing.T) {
 		window := 100 * time.Millisecond
 		key := redisTestKey(t, "partial-expiry")
 
-		allowed, err := store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err := store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 1, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected setup call %d to be allowed", 1)
 		}
 
 		time.Sleep(60 * time.Millisecond)
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on setup call %d: %v", 2, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected setup call %d to be allowed", 2)
 		}
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on deny call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected setup call %d to be denied", 3)
 		}
 
 		time.Sleep(60 * time.Millisecond)
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error after oldest request expired: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected request to be allowed after oldest request expired")
 		}
 
-		allowed, err = store.AllowSlidingWindow(ctx, key, limit, window)
+		verdict, err = store.AllowSlidingWindow(ctx, key, limit, window)
 		if err != nil {
 			t.Fatalf("unexpected error on final deny call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected request to be denied because only one expired request freed capacity")
 		}
 	})
@@ -473,20 +473,20 @@ func TestAllowTokenBucket(t *testing.T) {
 		key := redisTestKey(t, "happy")
 
 		for call := 1; call <= int(capacity); call++ {
-			allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+			verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 			if err != nil {
 				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected call %d to be allowed while bucket still has tokens", call)
 			}
 		}
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on drained-bucket call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected request to be denied after bucket was drained")
 		}
 	})
@@ -496,37 +496,37 @@ func TestAllowTokenBucket(t *testing.T) {
 		rate := float64(10)
 		key := redisTestKey(t, "happy-refill")
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on allowed call %d: %v", 2, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 2)
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on drained-bucket call %d: %v", 3, err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected call %d to be denied after bucket was drained", 3)
 		}
 
 		time.Sleep(120 * time.Millisecond)
 
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error after refill wait on call %d: %v", 4, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected call %d to be allowed after one token refilled", 4)
 		}
 	})
@@ -536,29 +536,29 @@ func TestAllowTokenBucket(t *testing.T) {
 		rate := float64(10)
 		key := redisTestKey(t, "partial-refill")
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on empty-bucket call %d: %v", 2, err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected call %d to be denied because bucket has no tokens", 2)
 		}
 
 		time.Sleep(50 * time.Millisecond)
 
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error after partial refill on call %d: %v", 3, err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected call %d to be denied because partial refill is less than one token", 3)
 		}
 	})
@@ -568,30 +568,30 @@ func TestAllowTokenBucket(t *testing.T) {
 		rate := float64(10)
 		key := redisTestKey(t, "refill-at-capacity")
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on allowed call %d: %v", 1, err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatalf("expected call %d to be allowed while bucket still has tokens", 1)
 		}
 
 		time.Sleep(1000 * time.Millisecond)
 
 		for call := 2; call <= int(capacity)+1; call++ {
-			allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+			verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 			if err != nil {
 				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected call %d to be allowed while bucket has refilled capacity", call)
 			}
 		}
-		allowed, err = store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on over-capacity call %d: %v", 4, err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatalf("expected call %d to be denied because refill must not exceed bucket capacity", 4)
 		}
 	})
@@ -606,12 +606,12 @@ func TestAllowTokenBucket(t *testing.T) {
 
 		for range workers {
 			wg.Go(func() {
-				allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+				verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 				if err != nil {
 					t.Errorf("unexpected error during concurrent request: %v", err)
 					return
 				}
-				if allowed {
+				if verdict.Allowed {
 					allowedCount.Add(1)
 				}
 			})
@@ -630,35 +630,35 @@ func TestAllowTokenBucket(t *testing.T) {
 		keyA := redisTestKey(t, "key-a")
 		keyB := redisTestKey(t, "key-b")
 
-		allowed, err := store.AllowTokenBucket(ctx, keyA, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, keyA, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error for first key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first key to start with a full bucket")
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, keyA, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, keyA, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error for exhausted first key: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected second request for first key to be denied after its bucket was drained")
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error for second key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected second key to start with a full bucket")
 		}
 
-		allowed, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
+		verdict, err = store.AllowTokenBucket(ctx, keyB, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error for exhausted second key: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected second request for second key to be denied after its bucket was drained")
 		}
 	})
@@ -668,11 +668,11 @@ func TestAllowTokenBucket(t *testing.T) {
 		rate := float64(1)
 		key := redisTestKey(t, "expiration")
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error while creating token bucket key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first request to create a full token bucket and be allowed")
 		}
 
@@ -702,24 +702,24 @@ func TestAllowLeakyBucket(t *testing.T) {
 		key := redisTestKey(t, "happy")
 
 		for call := 1; call <= int(burst); call++ {
-			allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+			verdict, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
 			if err != nil {
 				t.Fatalf("unexpected error on allowed call %d: %v", call, err)
 			}
-			if !allowed {
+			if !verdict.Allowed {
 				t.Fatalf("expected call %d to be allowed within burst tolerance", call)
 			}
 		}
 
-		allowed, retryAfter, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		verdict, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error on over-burst call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected request to be denied after burst tolerance was exceeded")
 		}
-		if retryAfter <= 0 {
-			t.Fatalf("expected a positive retry-after when denied, got %s", retryAfter)
+		if verdict.RetryAfter <= 0 {
+			t.Fatalf("expected a positive retry-after when denied, got %s", verdict.RetryAfter)
 		}
 	})
 
@@ -729,35 +729,35 @@ func TestAllowLeakyBucket(t *testing.T) {
 		burst := int64(1)
 		key := redisTestKey(t, "catch-up")
 
-		allowed, retryAfter, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		verdict, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error on first call: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first request to be allowed")
 		}
-		if retryAfter != 0 {
-			t.Fatalf("expected retryAfter = 0 when allowed, got %s", retryAfter)
+		if verdict.RetryAfter != 0 {
+			t.Fatalf("expected verdict.RetryAfter = 0 when allowed, got %s", verdict.RetryAfter)
 		}
 
-		allowed, retryAfter, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		verdict, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error on second call: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected immediate second request to be denied with no burst tolerance")
 		}
-		if retryAfter <= 0 || retryAfter > window/10 {
-			t.Fatalf("expected retryAfter roughly equal to the 10ms emission interval, got %s", retryAfter)
+		if verdict.RetryAfter <= 0 || verdict.RetryAfter > window/10 {
+			t.Fatalf("expected verdict.RetryAfter roughly equal to the 10ms emission interval, got %s", verdict.RetryAfter)
 		}
 
 		time.Sleep(15 * time.Millisecond)
 
-		allowed, _, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		verdict, err = store.AllowLeakyBucket(ctx, key, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error after waiting for the schedule: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected request to be allowed once the emission interval elapsed")
 		}
 	})
@@ -774,12 +774,12 @@ func TestAllowLeakyBucket(t *testing.T) {
 
 		for range workers {
 			wg.Go(func() {
-				allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+				verdict, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
 				if err != nil {
 					t.Errorf("unexpected error during concurrent request: %v", err)
 					return
 				}
-				if allowed {
+				if verdict.Allowed {
 					allowedCount.Add(1)
 				}
 			})
@@ -799,27 +799,27 @@ func TestAllowLeakyBucket(t *testing.T) {
 		keyA := redisTestKey(t, "key-a")
 		keyB := redisTestKey(t, "key-b")
 
-		allowed, _, err := store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
+		verdict, err := store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error for first key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first key's first request to be allowed")
 		}
 
-		allowed, _, err = store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
+		verdict, err = store.AllowLeakyBucket(ctx, keyA, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error for exhausted first key: %v", err)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected second request for first key to be denied")
 		}
 
-		allowed, _, err = store.AllowLeakyBucket(ctx, keyB, limit, window, burst)
+		verdict, err = store.AllowLeakyBucket(ctx, keyB, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error for second key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected second key's first request to be allowed, manager is leaking state between keys")
 		}
 	})
@@ -830,11 +830,11 @@ func TestAllowLeakyBucket(t *testing.T) {
 		burst := int64(1)
 		key := redisTestKey(t, "expiration")
 
-		allowed, _, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
+		verdict, err := store.AllowLeakyBucket(ctx, key, limit, window, burst)
 		if err != nil {
 			t.Fatalf("unexpected error while creating leaky bucket key: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected first request to be allowed")
 		}
 
@@ -854,14 +854,14 @@ func TestAllowLeakyBucket(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		allowed, retryAfter, err := store.AllowLeakyBucket(canceledCtx, redisTestKey(t, "canceled"), 10, time.Second, 1)
+		verdict, err := store.AllowLeakyBucket(canceledCtx, redisTestKey(t, "canceled"), 10, time.Second, 1)
 		if err == nil {
 			t.Fatal("expected context cancellation error, got nil")
 		}
-		if retryAfter != 0 {
-			t.Fatalf("expected retryAfter = 0 on error, got %s", retryAfter)
+		if verdict.RetryAfter != 0 {
+			t.Fatalf("expected verdict.RetryAfter = 0 on error, got %s", verdict.RetryAfter)
 		}
-		if allowed {
+		if verdict.Allowed {
 			t.Fatal("expected canceled request to fail closed")
 		}
 	})
@@ -985,11 +985,11 @@ func TestSyncFixedWindow(t *testing.T) {
 		window := 5 * time.Second
 		key := redisTestKey(t, "interop")
 
-		allowed, err := store.AllowFixedWindow(ctx, key, 10, window)
+		verdict, err := store.AllowFixedWindow(ctx, key, 10, window)
 		if err != nil {
 			t.Fatalf("unexpected error on direct allow: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected direct allow to succeed")
 		}
 
@@ -1093,11 +1093,11 @@ func TestSyncTokenBucket(t *testing.T) {
 		rate := float64(0.0001)
 		key := redisTestKey(t, "interop")
 
-		allowed, err := store.AllowTokenBucket(ctx, key, capacity, rate)
+		verdict, err := store.AllowTokenBucket(ctx, key, capacity, rate)
 		if err != nil {
 			t.Fatalf("unexpected error on direct allow: %v", err)
 		}
-		if !allowed {
+		if !verdict.Allowed {
 			t.Fatal("expected direct allow to succeed")
 		}
 
@@ -1154,11 +1154,11 @@ func TestClusterClientSatisfiesStore(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	allowed, err := store.AllowFixedWindow(ctx, "test-key-cluster", 10, time.Second)
+	verdict, err := store.AllowFixedWindow(ctx, "test-key-cluster", 10, time.Second)
 	if err == nil {
 		t.Fatal("expected an error from an unreachable cluster, got nil")
 	}
-	if allowed {
+	if verdict.Allowed {
 		t.Fatal("expected allowed=false (fail closed) from an unreachable cluster")
 	}
 }
@@ -1175,45 +1175,45 @@ func TestDisconnectedClient(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Fixed Window Fail Closed", func(t *testing.T) {
-		success, err := store.AllowFixedWindow(ctx, "test-key-fw", 10, time.Millisecond)
+		verdict, err := store.AllowFixedWindow(ctx, "test-key-fw", 10, time.Millisecond)
 		if err == nil {
 			t.Errorf("Expected an error due to disconnected Redis, but got nil")
 		}
-		if success {
+		if verdict.Allowed {
 			t.Errorf("Expected success to be false due to bad Redis client")
 		}
 	})
 
 	t.Run("Sliding Window Fail Closed", func(t *testing.T) {
-		success, err := store.AllowSlidingWindow(ctx, "test-key-sw", 10, time.Millisecond)
+		verdict, err := store.AllowSlidingWindow(ctx, "test-key-sw", 10, time.Millisecond)
 		if err == nil {
 			t.Errorf("Expected an error due to disconnected Redis, but got nil")
 		}
-		if success {
+		if verdict.Allowed {
 			t.Errorf("Expected success to be false due to bad Redis client")
 		}
 	})
 
 	t.Run("Token Bucket Fail Closed", func(t *testing.T) {
-		success, err := store.AllowTokenBucket(ctx, "test-key-tb", float64(10), float64(1))
+		verdict, err := store.AllowTokenBucket(ctx, "test-key-tb", float64(10), float64(1))
 		if err == nil {
 			t.Errorf("Expected an error due to disconnected Redis, but got nil")
 		}
-		if success {
+		if verdict.Allowed {
 			t.Errorf("Expected success to be false due to bad Redis client")
 		}
 	})
 
 	t.Run("Leaky Bucket Fail Closed", func(t *testing.T) {
-		success, retryAfter, err := store.AllowLeakyBucket(ctx, "test-key-lb", int64(10), time.Second, 1)
+		verdict, err := store.AllowLeakyBucket(ctx, "test-key-lb", int64(10), time.Second, 1)
 		if err == nil {
 			t.Errorf("Expected an error due to disconnected Redis, but got nil")
 		}
-		if success {
+		if verdict.Allowed {
 			t.Errorf("Expected success to be false due to bad Redis client")
 		}
-		if retryAfter != 0 {
-			t.Errorf("Expected retryAfter = 0 on error, got %s", retryAfter)
+		if verdict.RetryAfter != 0 {
+			t.Errorf("Expected verdict.RetryAfter = 0 on error, got %s", verdict.RetryAfter)
 		}
 	})
 }

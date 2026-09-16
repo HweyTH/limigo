@@ -336,3 +336,81 @@ func assertResponse(t *testing.T, got checkResponse, want checkResponse) {
 		t.Fatalf("response = %+v, want %+v", got, want)
 	}
 }
+
+// TestNewCheckHandlerEmitsRateLimitHeaders pins the IETF RateLimit-Policy
+// and RateLimit fields (draft-ietf-httpapi-ratelimit-headers-11) on every
+// matched response: the static policy on allowed, denied and fail-closed
+// responses alike, the live quota only when a decision was actually made,
+// and neither when no rule matched.
+func TestNewCheckHandlerEmitsRateLimitHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		decision   rules.Decision
+		checkErr   error
+		wantPolicy string
+		wantLimit  string
+	}{
+		{
+			name:       "allowed fixed window carries window and reset",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: "free-tier", Limit: 100, Window: time.Minute, Remaining: 57, Reset: 12500 * time.Millisecond},
+			wantPolicy: `"free-tier";q=100;w=60`,
+			wantLimit:  `"free-tier";r=57;t=13`,
+		},
+		{
+			name:       "denied still reports quota",
+			decision:   rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier", Limit: 100, Window: time.Minute, Remaining: 0, Reset: 30 * time.Second},
+			wantPolicy: `"free-tier";q=100;w=60`,
+			wantLimit:  `"free-tier";r=0;t=30`,
+		},
+		{
+			name:       "token bucket has no window",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: "pro-tier", Limit: 1000, Remaining: 999, Reset: 5 * time.Millisecond},
+			wantPolicy: `"pro-tier";q=1000`,
+			wantLimit:  `"pro-tier";r=999;t=1`,
+		},
+		{
+			name:       "sub-second window cannot be expressed as w",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: "fast", Limit: 5, Window: 500 * time.Millisecond, Remaining: 4, Reset: 400 * time.Millisecond},
+			wantPolicy: `"fast";q=5`,
+			wantLimit:  `"fast";r=4;t=1`,
+		},
+		{
+			name:       "locally cached rule omits an unknown reset",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: "cached-tier", Limit: 100, Window: time.Minute, Remaining: 42},
+			wantPolicy: `"cached-tier";q=100;w=60`,
+			wantLimit:  `"cached-tier";r=42`,
+		},
+		{
+			name:       "store error carries the policy but no live quota",
+			decision:   rules.Decision{Allowed: false, Matched: true, RuleName: "free-tier", Limit: 100, Window: time.Minute},
+			checkErr:   errors.New("redis unavailable"),
+			wantPolicy: `"free-tier";q=100;w=60`,
+			wantLimit:  "",
+		},
+		{
+			name:       "unmatched carries neither",
+			decision:   rules.Decision{Allowed: false, Matched: false},
+			wantPolicy: "",
+			wantLimit:  "",
+		},
+		{
+			name:       "policy name is quoted as a structured-field string",
+			decision:   rules.Decision{Allowed: true, Matched: true, RuleName: `odd"name\`, Limit: 1, Window: time.Second, Remaining: 0, Reset: time.Second},
+			wantPolicy: `"odd\"name\\";q=1;w=1`,
+			wantLimit:  `"odd\"name\\";r=0;t=1`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checker := &fakeChecker{decision: tt.decision, err: tt.checkErr}
+			recorder := serveCheckRequest(t, checker, http.MethodPost, `{"key":"user-123"}`, "free")
+
+			if got := recorder.Header().Get("RateLimit-Policy"); got != tt.wantPolicy {
+				t.Errorf("RateLimit-Policy = %q, want %q", got, tt.wantPolicy)
+			}
+			if got := recorder.Header().Get("RateLimit"); got != tt.wantLimit {
+				t.Errorf("RateLimit = %q, want %q", got, tt.wantLimit)
+			}
+		})
+	}
+}

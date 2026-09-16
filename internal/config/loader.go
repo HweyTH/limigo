@@ -45,6 +45,8 @@ func Validate(cfg *Config) error {
 func validateRule(rule Rule) error {
 	if strings.TrimSpace(rule.Name) == "" {
 		return fmt.Errorf("a rule is missing a name")
+	} else if !isStructuredFieldString(rule.Name) {
+		return fmt.Errorf("rule %q: name must be printable ASCII without double quotes or backslashes, so it can be sent as the policy name in the RateLimit-Policy header", rule.Name)
 	} else if strings.TrimSpace(rule.Match.HeaderName) == "" {
 		return fmt.Errorf("rule %q: match.header must not be empty", rule.Name)
 	} else if strings.TrimSpace(rule.Match.Value) == "" {
@@ -134,4 +136,20 @@ func validateNoExtraSettings(rule Rule, algorithm Algorithm) error {
 		return fmt.Errorf("rule %q: leaky_bucket settings only apply when algorithm is %q", rule.Name, LeakyBucket)
 	}
 	return nil
+}
+
+// isStructuredFieldString reports whether s can be carried verbatim as an
+// RFC 9651 Structured Field String: printable ASCII (0x20–0x7E) with no
+// double quote or backslash, the two characters sf-string would need to
+// escape. Rule names travel in the RateLimit-Policy and RateLimit response
+// headers as the policy identifier, so they are constrained at load time
+// rather than escaped or mangled at response time.
+func isStructuredFieldString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7E || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }

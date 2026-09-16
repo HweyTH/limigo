@@ -264,6 +264,33 @@ func TestValidateRejectsBadConfig(t *testing.T) {
 			wantErr: "missing a name",
 		},
 		{
+			name: "name with a double quote cannot be a structured-field string",
+			cfg: func() *Config {
+				cfg := validWindowConfig(SlidingWindow)
+				cfg.Rules[0].Name = `free"tier`
+				return cfg
+			},
+			wantErr: "name must be printable ASCII without",
+		},
+		{
+			name: "name with a backslash cannot be a structured-field string",
+			cfg: func() *Config {
+				cfg := validWindowConfig(SlidingWindow)
+				cfg.Rules[0].Name = `free\tier`
+				return cfg
+			},
+			wantErr: "name must be printable ASCII without",
+		},
+		{
+			name: "name with non-ASCII cannot be a structured-field string",
+			cfg: func() *Config {
+				cfg := validWindowConfig(SlidingWindow)
+				cfg.Rules[0].Name = "frée-tier"
+				return cfg
+			},
+			wantErr: "name must be printable ASCII without",
+		},
+		{
 			name: "empty match header",
 			cfg: func() *Config {
 				cfg := validWindowConfig(SlidingWindow)

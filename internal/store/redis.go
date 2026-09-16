@@ -53,60 +53,75 @@ func NewRedisStore(redisClient redis.Scripter, fwScript string, swScript string,
 }
 
 // AllowFixedWindow increments the request counter for key within the current window
-// and returns true if the count is within limit, false if it should be throttled.
-// The window resets automatically when the Redis key expires.
-func (store *RedisStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+// and reports whether the count is within limit. The window resets automatically
+// when the Redis key expires; Verdict.Reset is the time left until it does.
+func (store *RedisStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error) {
 	start := time.Now()
 	cmd := store.fixedWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
 	store.recorder.ObserveRedisLatency("fixed_window", time.Since(start))
 
-	res, err := cmd.Int64Slice()
+	res, err := int64Reply(cmd, 4)
 	if err != nil {
-		return false, fmt.Errorf("failed to execute fixed window algorithm: %w", err)
+		return Verdict{}, fmt.Errorf("failed to execute fixed window algorithm: %w", err)
 	}
 	store.recorder.ObserveLuaExecution("fixed_window", time.Duration(res[1])*time.Microsecond)
-	return res[0] == 1, nil
+	return Verdict{
+		Allowed:   res[0] == 1,
+		Remaining: res[2],
+		Reset:     time.Duration(res[3]) * time.Millisecond,
+	}, nil
 }
 
 // AllowSlidingWindow records the current request for key in a sliding window and
-// returns true if the number of requests within the rolling window is within limit,
-// false if it should be throttled.
-func (store *RedisStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+// reports whether the number of requests within the rolling window is within
+// limit. Verdict.Reset is the time until the oldest recorded request leaves the
+// window.
+func (store *RedisStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error) {
 	start := time.Now()
 	cmd := store.slidingWindowScript.Run(ctx, store.client, []string{key}, limit, window.Milliseconds())
 	store.recorder.ObserveRedisLatency("sliding_window", time.Since(start))
 
-	res, err := cmd.Int64Slice()
+	res, err := int64Reply(cmd, 4)
 	if err != nil {
-		return false, fmt.Errorf("failed to execute sliding window algorithm: %w", err)
+		return Verdict{}, fmt.Errorf("failed to execute sliding window algorithm: %w", err)
 	}
 	store.recorder.ObserveLuaExecution("sliding_window", time.Duration(res[1])*time.Microsecond)
-	return res[0] == 1, nil
+	return Verdict{
+		Allowed:   res[0] == 1,
+		Remaining: res[2],
+		Reset:     time.Duration(res[3]) * time.Millisecond,
+	}, nil
 }
 
 // AllowTokenBucket attempts to consume one token from the bucket for key, refilling
-// based on elapsed time and rate. Returns true if a token was consumed, false if the
-// bucket is empty and the request should be throttled.
-func (store *RedisStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error) {
+// based on elapsed time and rate. Verdict.Remaining is the whole tokens left after
+// the attempt; Verdict.Reset is the time until the bucket is back at capacity.
+func (store *RedisStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (Verdict, error) {
 	start := time.Now()
 	cmd := store.tokenBucketScript.Run(ctx, store.client, []string{key}, capacity, rate)
 	store.recorder.ObserveRedisLatency("token_bucket", time.Since(start))
 
-	res, err := cmd.Int64Slice()
+	res, err := int64Reply(cmd, 4)
 	if err != nil {
-		return false, fmt.Errorf("failed to execute token bucket algorithm: %w", err)
+		return Verdict{}, fmt.Errorf("failed to execute token bucket algorithm: %w", err)
 	}
 	store.recorder.ObserveLuaExecution("token_bucket", time.Duration(res[1])*time.Microsecond)
-	return res[0] == 1, nil
+	return Verdict{
+		Allowed:   res[0] == 1,
+		Remaining: res[2],
+		Reset:     time.Duration(res[3]) * time.Millisecond,
+	}, nil
 }
 
-// AllowLeakyBucket admits one request against key's GCRA schedule, returning true
-// if the request arrived on schedule, false if it arrived too early and should be
-// throttled. limit and window define the emission interval (window / limit); burst
-// defines the tolerance for clumped arrivals (emission_interval * (burst - 1)).
-// burst values less than 1 are treated as 1 (no clumping tolerance). When denied,
-// retryAfter is the exact duration until key's schedule will next admit a request.
-func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (allowed bool, retryAfter time.Duration, err error) {
+// AllowLeakyBucket admits one request against key's GCRA schedule, reporting
+// whether the request arrived on schedule or too early. limit and window define
+// the emission interval (window / limit); burst defines the tolerance for clumped
+// arrivals (emission_interval * (burst - 1)). burst values less than 1 are treated
+// as 1 (no clumping tolerance). When denied, Verdict.RetryAfter is the exact
+// duration until key's schedule will next admit a request. Verdict.Remaining is
+// how many further requests the tolerance would admit right now; Verdict.Reset
+// is the time until the schedule has fully caught up.
+func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (Verdict, error) {
 	if burst < 1 {
 		burst = 1
 	}
@@ -117,12 +132,31 @@ func (store *RedisStore) AllowLeakyBucket(ctx context.Context, key string, limit
 	cmd := store.leakyBucketScript.Run(ctx, store.client, []string{key}, emissionIntervalMs, toleranceMs)
 	store.recorder.ObserveRedisLatency("leaky_bucket", time.Since(start))
 
-	res, err := cmd.Int64Slice()
+	res, err := int64Reply(cmd, 5)
 	if err != nil {
-		return false, 0, fmt.Errorf("failed to execute leaky bucket algorithm: %w", err)
+		return Verdict{}, fmt.Errorf("failed to execute leaky bucket algorithm: %w", err)
 	}
 	store.recorder.ObserveLuaExecution("leaky_bucket", time.Duration(res[2])*time.Microsecond)
-	return res[0] == 1, time.Duration(res[1]) * time.Millisecond, nil
+	return Verdict{
+		Allowed:    res[0] == 1,
+		RetryAfter: time.Duration(res[1]) * time.Millisecond,
+		Remaining:  res[3],
+		Reset:      time.Duration(res[4]) * time.Millisecond,
+	}, nil
+}
+
+// int64Reply reads a script's integer-array reply and checks it has exactly
+// want elements, so a script and its Go caller that disagree about the reply
+// shape fail with a clear error instead of an index panic on the hot path.
+func int64Reply(cmd *redis.Cmd, want int) ([]int64, error) {
+	res, err := cmd.Int64Slice()
+	if err != nil {
+		return nil, err
+	}
+	if len(res) != want {
+		return nil, fmt.Errorf("script returned %d values, want %d", len(res), want)
+	}
+	return res, nil
 }
 
 // SyncFixedWindow folds delta (requests already admitted locally since the last

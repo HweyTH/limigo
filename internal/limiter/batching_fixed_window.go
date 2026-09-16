@@ -30,13 +30,27 @@ func NewBatchingFixedWindow(limit int64) *BatchingFixedWindow {
 // backing store. It never contacts a backing store and is safe for
 // concurrent use.
 func (b *BatchingFixedWindow) Allow(ctx context.Context, key string) (bool, error) {
+	allowed, _ := b.Admit(ctx, key)
+	return allowed, nil
+}
+
+// Admit is Allow with the node's local view of the remaining quota after the
+// decision: limit minus the last known remote total minus every local admit
+// not yet reconciled, clamped at zero. It is a local view, not the fleet's —
+// other nodes' unflushed admits are invisible here — and it is read in the
+// same critical section as the decision so the two cannot disagree.
+func (b *BatchingFixedWindow) Admit(ctx context.Context, key string) (allowed bool, remaining int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.remoteTotal+b.pendingDelta < b.limit {
 		b.pendingDelta++
-		return true, nil
+		allowed = true
 	}
-	return false, nil
+	remaining = b.limit - (b.remoteTotal + b.pendingDelta)
+	if remaining < 0 {
+		remaining = 0
+	}
+	return allowed, remaining
 }
 
 // PendingDelta returns the number of local admits not yet reconciled with the

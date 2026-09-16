@@ -2,6 +2,7 @@ package limiter
 
 import (
 	"context"
+	"math"
 	"sync"
 )
 
@@ -33,13 +34,26 @@ func NewBatchingTokenBucket(capacity, rate float64) *BatchingTokenBucket {
 // backing store. It never contacts a backing store and is safe for
 // concurrent use.
 func (b *BatchingTokenBucket) Allow(ctx context.Context, key string) (bool, error) {
+	allowed, _ := b.Admit(ctx, key)
+	return allowed, nil
+}
+
+// Admit is Allow with the node's local view of the whole tokens remaining
+// after the decision: the last known remote count minus every local admit
+// not yet reconciled, floored and clamped at zero. It is a local view, not
+// the fleet's, and is read in the same critical section as the decision.
+func (b *BatchingTokenBucket) Admit(ctx context.Context, key string) (allowed bool, remaining int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.remoteTokens-b.pendingDelta >= 1 {
 		b.pendingDelta++
-		return true, nil
+		allowed = true
 	}
-	return false, nil
+	local := b.remoteTokens - b.pendingDelta
+	if local < 0 {
+		local = 0
+	}
+	return allowed, int64(math.Floor(local))
 }
 
 // PendingDelta returns the number of tokens consumed locally and not yet

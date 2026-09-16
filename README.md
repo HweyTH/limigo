@@ -335,6 +335,47 @@ permitted under *effects replication*, which became the default in **Redis 5**
 (Redis 7 removed the older verbatim mode entirely). The minimum supported Redis
 is therefore 5; the compose stack and the integration suite pin `redis:7`.
 
+### RateLimit header fields
+
+Every response for a matched rule carries the two fields from
+**`draft-ietf-httpapi-ratelimit-headers-11`** ("RateLimit header fields for
+HTTP", IETF HTTPAPI working group, 23 May 2026). The revision is cited on
+purpose: the syntax changed materially across revisions of this draft (earlier
+ones used three separate `RateLimit-Limit` / `-Remaining` / `-Reset` fields,
+then a single comma-separated `RateLimit`), so an uncited "IETF headers" claim
+ages into a wrong one. If the draft moves again, this section and
+`internal/api/check.go` move with it.
+
+```http
+RateLimit-Policy: "free-tier-fixed-window";q=100;w=60
+RateLimit: "free-tier-fixed-window";r=57;t=13
+```
+
+Both are Structured Field Dictionaries keyed by the **policy name**, which is
+the rule name from the config file (constrained at load time to printable ASCII
+without quotes or backslashes, so it can be sent verbatim).
+
+| Field | Parameter | Meaning | Source |
+|---|---|---|---|
+| `RateLimit-Policy` | `q` | the quota, in requests | the rule's `limit` (window algorithms, leaky bucket) or `capacity` (token bucket) |
+| `RateLimit-Policy` | `w` | the window, in whole seconds | the rule's `window`; **omitted** for token bucket, which has no window, and for a window under one second, which the field cannot express |
+| `RateLimit` | `r` | requests remaining after this decision | computed inside the Lua script beside the verdict, so it cannot race the next request |
+| `RateLimit` | `t` | seconds until the quota is fully restored, rounded up | the window's remaining TTL; the oldest sliding-window entry's expiry; the token bucket's time to refill to capacity; the GCRA schedule's catch-up time |
+
+`RateLimit-Policy` is static and is sent on every matched response, including
+the fail-closed `503`. `RateLimit` describes a decision the store actually
+made, so it is absent on a `503`. Neither is sent when no rule matched.
+
+**The `local_cache` wrinkle.** For a rule with `local_cache: true`, `r` is
+**this node's view** of the remaining quota, not the fleet's: other nodes'
+admits since the last flush are invisible to it, which is the same bounded
+accuracy window the overshoot measurements in §2 quantify, now visible in the
+response. `t` is omitted for such rules, because the local cache does not
+track when the store's window rolls over or its bucket refills — it only
+learns that from the next flush. A client reading `r` off a cached rule should
+treat it as a hint accurate to one flush interval per node, not as a
+reservation.
+
 ### Fail closed when the store is unreachable
 
 **Decision.** When Redis cannot be reached — connection refused, dial or read
@@ -749,16 +790,31 @@ curl -X POST localhost:8080/v1/check \
   -d '{"key":"user-123"}'
 ```
 
-```json
+```http
+HTTP/1.1 200 OK
+RateLimit-Policy: "free-tier-fixed-window";q=100;w=60
+RateLimit: "free-tier-fixed-window";r=99;t=60
+Content-Type: application/json
+
 {"allowed":true,"matched":true,"rule":"free-tier-fixed-window"}
 ```
 
-Repeat past the rule's limit (100 requests/minute) and the same request
-returns `429 Too Many Requests` instead of `200`. Fixed window cannot compute
-an exact retry time, so there is no `Retry-After` header here; see the leaky
-bucket section above for a rule that sends one:
+Every matched response carries the IETF `RateLimit-Policy` and `RateLimit`
+fields — see [RateLimit header fields](#ratelimit-header-fields) for what
+they mean and which draft revision they follow.
 
-```json
+Repeat past the rule's limit (100 requests/minute) and the same request
+returns `429 Too Many Requests` instead of `200`, with `r=0` and `t` counting
+down to the window's end. Fixed window cannot compute an exact retry time, so
+there is no `Retry-After` header here; see the leaky bucket section above for
+a rule that sends one:
+
+```http
+HTTP/1.1 429 Too Many Requests
+RateLimit-Policy: "free-tier-fixed-window";q=100;w=60
+RateLimit: "free-tier-fixed-window";r=0;t=37
+Content-Type: application/json
+
 {"allowed":false,"matched":true,"rule":"free-tier-fixed-window"}
 ```
 

@@ -7,11 +7,15 @@
 -- Denied requests do not advance the schedule, so a rejected burst does not
 -- push future requests further out than the configured rate allows.
 --
--- Returns a three-element array {allowed, retry_after_ms, lua_us}. retry_after_ms
+-- Returns {allowed, retry_after_ms, lua_us, remaining, reset_ms}. retry_after_ms
 -- is 0 when allowed, or the exact number of milliseconds (rounded up) until this
 -- key's schedule will next admit a request when denied — GCRA already knows
 -- this precisely, so callers get an exact backoff instead of guessing. lua_us is
 -- the script's own execution time in microseconds, sampled via redis.call('TIME').
+-- remaining is how many further requests the burst tolerance would admit right
+-- now, after this one (0 when denied); reset_ms is the time until the schedule
+-- has fully caught up, i.e. the TAT is no longer in the future and the whole
+-- burst tolerance is available again.
 --
 -- Key layout: this script reads and writes exactly KEYS[1] and never builds a
 -- key name of its own. Redis Cluster only runs a script whose keys share one
@@ -51,11 +55,25 @@ if now_ms >= allow_at then
     local new_tat = tat + emission_interval_ms
     local ttl_ms = math.max(math.ceil(new_tat - now_ms), 1)
     redis.call('SET', KEYS[1], tostring(new_tat), 'PX', ttl_ms)
+    -- Further requests are admissible while now >= (new_tat + k * interval)
+    -- - tolerance, i.e. for k = 0 .. floor((now + tolerance - new_tat) / interval).
+    local remaining = math.floor((now_ms + tolerance_ms - new_tat) / emission_interval_ms) + 1
+    if remaining < 0 then
+        remaining = 0
+    end
+    local reset_ms = math.ceil(new_tat - now_ms)
+    if reset_ms < 0 then
+        reset_ms = 0
+    end
     local t1 = redis.call('TIME')
     local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
-    return {1, 0, lua_us}
+    return {1, 0, lua_us, remaining, reset_ms}
 end
 
+local reset_ms = math.ceil(tat - now_ms)
+if reset_ms < 0 then
+    reset_ms = 0
+end
 local t1 = redis.call('TIME')
 local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
-return {0, math.ceil(allow_at - now_ms), lua_us}
+return {0, math.ceil(allow_at - now_ms), lua_us, 0, reset_ms}

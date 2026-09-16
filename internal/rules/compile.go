@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/hweyth/limigo/internal/config"
@@ -40,7 +41,13 @@ type CompiledRule struct {
 	Name string
 	// Match defines the request attributes that activate the rule.
 	Match config.Match
-	allow func(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error)
+	// limit and window are the rule's static quota, reported on every
+	// Decision as the policy a caller is being held to: limit requests per
+	// window for the window algorithms and leaky bucket; capacity with a
+	// zero window for token bucket, which has no window to report.
+	limit  int64
+	window time.Duration
+	allow  func(ctx context.Context, key string) (store.Verdict, error)
 	// flush reconciles this rule's node-local cache with the backing Store.
 	// It is nil unless the rule opted into local caching (config.Rule.LocalCache).
 	flush func(ctx context.Context) error
@@ -51,11 +58,9 @@ func (r *CompiledRule) Matches(headerName, headerValue string) bool {
 	return headerName == r.Match.HeaderName && headerValue == r.Match.Value
 }
 
-// Allow evaluates the rule's configured algorithm for key, returning true if
-// the request is within limit, false if it should be throttled. When denied,
-// retryAfter is the exact duration until the next request will be admitted if
-// the algorithm can compute it (currently only leaky bucket); zero otherwise.
-func (r *CompiledRule) Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error) {
+// Allow evaluates the rule's configured algorithm for key. The Verdict
+// carries the decision and the quota state behind it; see store.Verdict.
+func (r *CompiledRule) Allow(ctx context.Context, key string) (store.Verdict, error) {
 	return r.allow(ctx, key)
 }
 
@@ -79,6 +84,22 @@ type Decision struct {
 	// a request, when the algorithm can compute it (currently only leaky
 	// bucket) and the request was denied. It is zero otherwise.
 	RetryAfter time.Duration
+	// Limit is the matched rule's quota in requests: limit for the window
+	// algorithms and leaky bucket, capacity for token bucket. Zero when
+	// Matched is false.
+	Limit int64
+	// Window is the period Limit applies to. Zero for token bucket, which
+	// refills continuously rather than per window, and when Matched is false.
+	Window time.Duration
+	// Remaining is the quota left after this decision. For a rule with
+	// node-local caching it is this node's local view, not the fleet's: other
+	// nodes' unflushed admits are invisible until the next flush, which is
+	// the same bounded accuracy window the overshoot measurements quantify.
+	Remaining int64
+	// Reset is how long until the quota is fully restored (store.Verdict.Reset).
+	// Zero when unknown — a locally cached rule does not track it — or when
+	// Matched is false.
+	Reset time.Duration
 }
 
 // Compile turns cfg's rules into an Engine backed by st. cfg is expected to
@@ -117,12 +138,13 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 			return compileBatchingFixedWindow(rule, st, limit, window), nil
 		}
 		return &CompiledRule{
-			Name:  rule.Name,
-			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			Name:   rule.Name,
+			Match:  rule.Match,
+			limit:  limit,
+			window: window,
+			allow: func(ctx context.Context, key string) (store.Verdict, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				allowed, err := st.AllowFixedWindow(ctx, storeKey, limit, window)
-				return allowed, 0, err
+				return st.AllowFixedWindow(ctx, storeKey, limit, window)
 			},
 		}, nil
 
@@ -132,12 +154,13 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 		}
 		limit, window := rule.SlidingWindow.Limit, rule.SlidingWindow.Window
 		return &CompiledRule{
-			Name:  rule.Name,
-			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			Name:   rule.Name,
+			Match:  rule.Match,
+			limit:  limit,
+			window: window,
+			allow: func(ctx context.Context, key string) (store.Verdict, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				allowed, err := st.AllowSlidingWindow(ctx, storeKey, limit, window)
-				return allowed, 0, err
+				return st.AllowSlidingWindow(ctx, storeKey, limit, window)
 			},
 		}, nil
 
@@ -152,10 +175,10 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 		return &CompiledRule{
 			Name:  rule.Name,
 			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			limit: tokenBucketLimit(capacity),
+			allow: func(ctx context.Context, key string) (store.Verdict, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				allowed, err := st.AllowTokenBucket(ctx, storeKey, capacity, rate)
-				return allowed, 0, err
+				return st.AllowTokenBucket(ctx, storeKey, capacity, rate)
 			},
 		}, nil
 
@@ -165,9 +188,11 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 		}
 		limit, window, burst := rule.LeakyBucket.Limit, rule.LeakyBucket.Window, rule.LeakyBucket.Burst
 		return &CompiledRule{
-			Name:  rule.Name,
-			Match: rule.Match,
-			allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
+			Name:   rule.Name,
+			Match:  rule.Match,
+			limit:  limit,
+			window: window,
+			allow: func(ctx context.Context, key string) (store.Verdict, error) {
 				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
 				return st.AllowLeakyBucket(ctx, storeKey, limit, window, burst)
 			},
@@ -186,11 +211,15 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window time.Duration) *CompiledRule {
 	manager := limiter.NewBatchingFixedWindowManager(limit)
 	return &CompiledRule{
-		Name:  rule.Name,
-		Match: rule.Match,
-		allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
-			allowed, err := manager.Allow(ctx, key)
-			return allowed, 0, err
+		Name:   rule.Name,
+		Match:  rule.Match,
+		limit:  limit,
+		window: window,
+		// Remaining is this node's local view; Reset is left zero because the
+		// local cache does not track when the window rolls over in the store.
+		allow: func(ctx context.Context, key string) (store.Verdict, error) {
+			allowed, remaining := manager.Admit(ctx, key)
+			return store.Verdict{Allowed: allowed, Remaining: remaining}, nil
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -224,9 +253,12 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 	return &CompiledRule{
 		Name:  rule.Name,
 		Match: rule.Match,
-		allow: func(ctx context.Context, key string) (bool, time.Duration, error) {
-			allowed, err := manager.Allow(ctx, key)
-			return allowed, 0, err
+		limit: tokenBucketLimit(capacity),
+		// Remaining is this node's local view; Reset is left zero because the
+		// local cache does not simulate refill between flushes.
+		allow: func(ctx context.Context, key string) (store.Verdict, error) {
+			allowed, remaining := manager.Admit(ctx, key)
+			return store.Verdict{Allowed: allowed, Remaining: remaining}, nil
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -256,6 +288,17 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 			return errs
 		},
 	}
+}
+
+// tokenBucketLimit is the quota a token bucket reports: its capacity, in
+// whole tokens. Capacity is configured as a float so fractional refill rates
+// have a matching type; a fractional capacity is floored here because the
+// reported quota is a count of requests.
+func tokenBucketLimit(capacity float64) int64 {
+	if capacity < 0 {
+		return 0
+	}
+	return int64(math.Floor(capacity))
 }
 
 // FlushLocalCaches reconciles every rule using node-local caching (see
@@ -296,8 +339,8 @@ func (e *Engine) Evaluate(ctx context.Context, headerName, headerValue, key stri
 	if !ok {
 		return false, false, nil
 	}
-	allowed, _, err = rule.Allow(ctx, key)
-	return allowed, true, err
+	verdict, err := rule.Allow(ctx, key)
+	return verdict.Allowed, true, err
 }
 
 // Check evaluates key against the first compiled rule whose configured header
@@ -311,12 +354,16 @@ func (e *Engine) Check(ctx context.Context, key string, headerValue func(string)
 
 	for _, rule := range e.compiledRules {
 		if headerValue(rule.Match.HeaderName) == rule.Match.Value {
-			allowed, retryAfter, err := rule.Allow(ctx, key)
+			verdict, err := rule.Allow(ctx, key)
 			return Decision{
-				Allowed:    allowed,
+				Allowed:    verdict.Allowed,
 				Matched:    true,
 				RuleName:   rule.Name,
-				RetryAfter: retryAfter,
+				RetryAfter: verdict.RetryAfter,
+				Limit:      rule.limit,
+				Window:     rule.window,
+				Remaining:  verdict.Remaining,
+				Reset:      verdict.Reset,
 			}, err
 		}
 	}

@@ -4,6 +4,11 @@
 -- 0 if it should be throttled. Time is sourced from Redis to avoid clock skew
 -- across application nodes.
 --
+-- Returns {allowed, lua_us, remaining, reset_ms}: remaining is the quota
+-- left in the rolling window after this request (never negative), reset_ms
+-- the time until the oldest recorded request leaves the window — the moment
+-- one unit of quota next comes back.
+--
 -- Key layout: this script reads and writes exactly KEYS[1] and never builds a
 -- key name of its own. Redis Cluster only runs a script whose keys share one
 -- hash slot, so one declared key makes it cluster-safe as-is. Do not add a
@@ -26,16 +31,33 @@ redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start)
 
 local num_requests = redis.call('ZCARD', KEYS[1])
 
+local limit = tonumber(ARGV[1])
 local allowed = 0
 
-if num_requests < tonumber(ARGV[1]) then
+if num_requests < limit then
     local member = tostring(time[1]) .. ':' .. tostring(time[2])
     redis.call('ZADD', KEYS[1], now_ms, member)
     redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
     allowed = 1
+    num_requests = num_requests + 1
+end
+
+local remaining = limit - num_requests
+if remaining < 0 then
+    remaining = 0
+end
+
+-- The oldest entry's score plus the window is when it will be evicted.
+local reset_ms = 0
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+if oldest[2] then
+    reset_ms = tonumber(oldest[2]) + tonumber(ARGV[2]) - now_ms
+    if reset_ms < 0 then
+        reset_ms = 0
+    end
 end
 
 local t1 = redis.call('TIME')
 local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
 
-return {allowed, lua_us}
+return {allowed, lua_us, remaining, reset_ms}

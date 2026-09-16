@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hweyth/limigo/internal/config"
+	"github.com/hweyth/limigo/internal/store"
 )
 
 // fakeStore is an in-memory Store double that records which algorithm was
@@ -17,6 +18,10 @@ type fakeStore struct {
 	lastCall        string
 	lastKey         string
 	leakyRetryAfter time.Duration
+	// remaining and reset are returned on every direct Allow* verdict so
+	// tests can check they reach the Decision untouched.
+	remaining int64
+	reset     time.Duration
 
 	// syncErr, syncTotal, and syncRemaining let tests script the batched
 	// delta-sync methods independently of the direct Allow* methods above.
@@ -50,28 +55,34 @@ func (r *fakeFillRatioRecorder) ClearTokenBucketFillRatio(rule string) {
 	delete(r.set, rule)
 }
 
-func (s *fakeStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+func (s *fakeStore) verdict() store.Verdict {
+	return store.Verdict{Allowed: s.allow, Remaining: s.remaining, Reset: s.reset}
+}
+
+func (s *fakeStore) AllowFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (store.Verdict, error) {
 	s.lastCall = "fixed_window"
 	s.lastKey = key
-	return s.allow, s.err
+	return s.verdict(), s.err
 }
 
-func (s *fakeStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (bool, error) {
+func (s *fakeStore) AllowSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (store.Verdict, error) {
 	s.lastCall = "sliding_window"
 	s.lastKey = key
-	return s.allow, s.err
+	return s.verdict(), s.err
 }
 
-func (s *fakeStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (bool, error) {
+func (s *fakeStore) AllowTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (store.Verdict, error) {
 	s.lastCall = "token_bucket"
 	s.lastKey = key
-	return s.allow, s.err
+	return s.verdict(), s.err
 }
 
-func (s *fakeStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (bool, time.Duration, error) {
+func (s *fakeStore) AllowLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (store.Verdict, error) {
 	s.lastCall = "leaky_bucket"
 	s.lastKey = key
-	return s.allow, s.leakyRetryAfter, s.err
+	v := s.verdict()
+	v.RetryAfter = s.leakyRetryAfter
+	return v, s.err
 }
 
 func (s *fakeStore) SyncFixedWindow(ctx context.Context, key string, delta int64, window time.Duration) (int64, error) {
@@ -806,5 +817,140 @@ func TestEngineFlushLocalCachesSkipsAndPropagatesErrors(t *testing.T) {
 	}
 	if store.syncCalls != 2 {
 		t.Fatalf("syncCalls = %d, want 2 (both LocalCache rules attempted despite one failing)", store.syncCalls)
+	}
+}
+
+// TestCheckReportsQuota verifies the quota a Decision carries for the
+// RateLimit headers: the static Limit and Window come from the rule's
+// configuration per algorithm, while Remaining and Reset are passed through
+// from the store's verdict untouched.
+func TestCheckReportsQuota(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{
+			{
+				Name:        "fw",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "fw"},
+				Algorithm:   config.FixedWindow,
+				FixedWindow: &config.WindowLimit{Limit: 100, Window: time.Minute},
+			},
+			{
+				Name:          "sw",
+				Match:         config.Match{HeaderName: "X-Plan", Value: "sw"},
+				Algorithm:     config.SlidingWindow,
+				SlidingWindow: &config.WindowLimit{Limit: 50, Window: 30 * time.Second},
+			},
+			{
+				Name:        "tb",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "tb"},
+				Algorithm:   config.TokenBucket,
+				TokenBucket: &config.TokenBucketConfig{Capacity: 1000.9, Rate: 200},
+			},
+			{
+				Name:        "lb",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "lb"},
+				Algorithm:   config.LeakyBucket,
+				LeakyBucket: &config.LeakyBucketConfig{Limit: 600, Window: time.Minute, Burst: 10},
+			},
+		},
+	}
+	store := &fakeStore{allow: true, remaining: 42, reset: 7 * time.Second}
+	engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
+	if err != nil {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+
+	tests := []struct {
+		plan       string
+		wantLimit  int64
+		wantWindow time.Duration
+	}{
+		{plan: "fw", wantLimit: 100, wantWindow: time.Minute},
+		{plan: "sw", wantLimit: 50, wantWindow: 30 * time.Second},
+		// Capacity is floored to a whole request count; a token bucket has no window.
+		{plan: "tb", wantLimit: 1000, wantWindow: 0},
+		{plan: "lb", wantLimit: 600, wantWindow: time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.plan, func(t *testing.T) {
+			decision, err := engine.Check(context.Background(), "client-1", func(string) string { return tt.plan })
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Limit != tt.wantLimit || decision.Window != tt.wantWindow {
+				t.Fatalf("Limit, Window = %d, %s; want %d, %s", decision.Limit, decision.Window, tt.wantLimit, tt.wantWindow)
+			}
+			if decision.Remaining != 42 || decision.Reset != 7*time.Second {
+				t.Fatalf("Remaining, Reset = %d, %s; want the store's 42, 7s", decision.Remaining, decision.Reset)
+			}
+		})
+	}
+
+	t.Run("unmatched carries no quota", func(t *testing.T) {
+		decision, err := engine.Check(context.Background(), "client-1", func(string) string { return "none" })
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if decision.Matched || decision.Limit != 0 || decision.Window != 0 || decision.Remaining != 0 || decision.Reset != 0 {
+			t.Fatalf("unmatched decision = %+v, want zero quota", decision)
+		}
+	})
+}
+
+// TestCheckReportsLocalQuotaForCachedRules verifies a locally cached rule
+// reports this node's local view of Remaining — counting down from the
+// last-known baseline with every local admit — and no Reset, since the
+// local cache does not track the store's window or refill.
+func TestCheckReportsLocalQuotaForCachedRules(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{
+			{
+				Name:        "cached-fw",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "cached-fw"},
+				Algorithm:   config.FixedWindow,
+				LocalCache:  true,
+				FixedWindow: &config.WindowLimit{Limit: 3, Window: time.Minute},
+			},
+			{
+				Name:        "cached-tb",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "cached-tb"},
+				Algorithm:   config.TokenBucket,
+				LocalCache:  true,
+				TokenBucket: &config.TokenBucketConfig{Capacity: 3, Rate: 1},
+			},
+		},
+	}
+	// The store's own verdict fields must never leak into a cached rule's
+	// decision: set them to values the assertions below would catch.
+	store := &fakeStore{allow: true, remaining: 99, reset: time.Hour}
+	engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
+	if err != nil {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+
+	for _, plan := range []string{"cached-fw", "cached-tb"} {
+		t.Run(plan, func(t *testing.T) {
+			for i, wantRemaining := range []int64{2, 1, 0} {
+				decision, err := engine.Check(context.Background(), "client-1", func(string) string { return plan })
+				if err != nil {
+					t.Fatalf("admit %d: unexpected error: %v", i+1, err)
+				}
+				if !decision.Allowed {
+					t.Fatalf("admit %d: denied, want allowed", i+1)
+				}
+				if decision.Limit != 3 || decision.Remaining != wantRemaining || decision.Reset != 0 {
+					t.Fatalf("admit %d: Limit, Remaining, Reset = %d, %d, %s; want 3, %d, 0s", i+1, decision.Limit, decision.Remaining, decision.Reset, wantRemaining)
+				}
+			}
+			decision, err := engine.Check(context.Background(), "client-1", func(string) string { return plan })
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if decision.Allowed || decision.Remaining != 0 {
+				t.Fatalf("exhausted: Allowed, Remaining = %v, %d; want false, 0", decision.Allowed, decision.Remaining)
+			}
+			if store.lastCall != "" {
+				t.Fatalf("cached rule called the store's direct %s path", store.lastCall)
+			}
+		})
 	}
 }

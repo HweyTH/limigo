@@ -195,3 +195,50 @@ func TestBatchingFixedWindowExhausted(t *testing.T) {
 		})
 	}
 }
+
+// TestBatchingFixedWindowAdmitRemaining verifies Admit reports the local
+// remaining quota after each decision — counting down from limit, clamped at
+// zero once exhausted, and recalibrated by a flush that reveals what other
+// nodes admitted.
+func TestBatchingFixedWindowAdmitRemaining(t *testing.T) {
+	bw := NewBatchingFixedWindow(3)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		before        func()
+		wantAllowed   bool
+		wantRemaining int64
+	}{
+		{name: "first admit", wantAllowed: true, wantRemaining: 2},
+		{name: "second admit", wantAllowed: true, wantRemaining: 1},
+		{name: "third admit exhausts", wantAllowed: true, wantRemaining: 0},
+		{name: "denied stays at zero", wantAllowed: false, wantRemaining: 0},
+		{
+			// A flush reports a fleet total above the limit: remaining must not
+			// go negative.
+			name:          "over-admitted fleet clamps at zero",
+			before:        func() { bw.ApplyRemoteTotal(3, 5) },
+			wantAllowed:   false,
+			wantRemaining: 0,
+		},
+		{
+			// The window rolled over in the store; a flush reports a total of 0.
+			name:          "rolled-over window restores quota",
+			before:        func() { bw.ApplyRemoteTotal(0, 0) },
+			wantAllowed:   true,
+			wantRemaining: 2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.before != nil {
+				tt.before()
+			}
+			allowed, remaining := bw.Admit(ctx, "key")
+			if allowed != tt.wantAllowed || remaining != tt.wantRemaining {
+				t.Fatalf("Admit = (%v, %d), want (%v, %d)", allowed, remaining, tt.wantAllowed, tt.wantRemaining)
+			}
+		})
+	}
+}

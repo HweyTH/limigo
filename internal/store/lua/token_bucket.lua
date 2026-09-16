@@ -4,6 +4,12 @@
 -- The refill timestamp is always updated regardless of whether the request is allowed,
 -- to ensure accurate token accumulation between calls.
 --
+-- Returns {allowed, lua_us, remaining, reset_ms}: remaining is the whole
+-- tokens left after this attempt (fraction dropped, never negative),
+-- reset_ms the time until the bucket is back at capacity at the configured
+-- refill rate — a token bucket has no window to roll over, so "reset" here
+-- means "fully refilled".
+--
 -- Key layout: this script reads and writes exactly KEYS[1] and never builds a
 -- key name of its own. Redis Cluster only runs a script whose keys share one
 -- hash slot, so one declared key makes it cluster-safe as-is. Do not add a
@@ -47,15 +53,23 @@ local allowed = 0
 redis.call('HSET', KEYS[1], 'last_refill_ms', now_ms)
 
 if token_count >= 1 then
-    redis.call('HSET', KEYS[1], 'tokens', token_count - 1)
+    token_count = token_count - 1
     allowed = 1
-else
-    redis.call('HSET', KEYS[1], 'tokens', token_count)
 end
+redis.call('HSET', KEYS[1], 'tokens', token_count)
 
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
+
+local remaining = math.floor(token_count)
+if remaining < 0 then
+    remaining = 0
+end
+local reset_ms = math.ceil((capacity - token_count) / refill_rate * 1000)
+if reset_ms < 0 then
+    reset_ms = 0
+end
 
 local t1 = redis.call('TIME')
 local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
 
-return {allowed, lua_us}
+return {allowed, lua_us, remaining, reset_ms}
