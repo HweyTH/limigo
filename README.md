@@ -58,9 +58,11 @@ unreachable, a limiter must either admit traffic it cannot meter or deny
 traffic it cannot justify denying. Limigo **fails closed**: `/v1/check`
 returns `503` with `allowed: false`, and the error is counted separately from
 a denial so a dashboard never confuses the two. That protects the quota at the
-cost of availability, which is right for some deployments and not others. It
-is deliberate but not yet defended in writing or measured under a real outage;
-[#4](https://github.com/HweyTH/limigo/issues/4) tracks that.
+cost of availability, which is right for some deployments and not others. The
+reasoning, the counter-position, and the condition under which the opposite
+choice is correct are in [Fail closed](#fail-closed-when-the-store-is-unreachable);
+`bench/run-outage.sh` measures what a node actually does across a Redis kill
+and restart.
 
 ## Architecture
 
@@ -321,6 +323,62 @@ skew across nodes (see [above](#why-distributed-rate-limiting-is-hard)).
 permitted under *effects replication*, which became the default in **Redis 5**
 (Redis 7 removed the older verbatim mode entirely). The minimum supported Redis
 is therefore 5; the compose stack and the integration suite pin `redis:7`.
+
+### Fail closed when the store is unreachable
+
+**Decision.** When Redis cannot be reached — connection refused, dial or read
+timeout, the per-request deadline expiring — `/v1/check` returns **`503`**
+with `allowed: false`, and records the outcome as `result="error"`, a label
+distinct from `denied`. The store call is bounded by a 5s per-request deadline
+that sits inside the server's 10s `WriteTimeout`, so a hung Redis surfaces as
+that 503 and not as a connection reset that no metric ever sees.
+
+**The alternative, and who argues for it.** Fail open: if the limiter cannot
+reach its store, admit the request. Stripe's engineering write-up on their
+rate limiters takes this position — a rate limiter must never be the thing
+that takes the API down, so a Redis outage should degrade to "unlimited" rather
+than to "closed". That is a serious argument from people who run the thing at
+scale, and it is not wrong; it optimises for a different failure.
+
+**Why closed, here.** The two choices protect different things. Fail-open
+protects availability and risks giving away unmetered quota for the length of
+the outage. Fail-closed protects the quota and risks turning an outage in the
+limiter into an outage in whatever it guards. Which is right depends on what
+sits behind the limiter. Limigo's default assumes the limiter is a gate in
+front of something scarce — a paid quota, a login endpoint, a downstream that
+falls over under unmetered load — where admitting an unbounded burst is the
+worse outcome. Stripe's assumption is a limiter in front of an API whose
+availability is the product; there, denying legitimate traffic is the worse
+outcome.
+
+**When the opposite is correct.** If the limiter guards a cost-control or
+free-tier limit in front of a downstream that would survive a few minutes of
+unmetered traffic, fail-open is the better default and this project's choice
+should be reversed for that deployment. A per-rule fail-open switch is the
+obvious extension; it is deliberately not built until there is a measurement
+of what fail-open does to a rule under an outage, so the switch does not ship
+as an untested promise.
+
+**Fail-closed is not uniform, and that is documented rather than hidden.** A
+rule with `local_cache: true` never touches Redis on the request path. During
+an outage it keeps admitting from the balance it last heard about, then denies
+with **`429`** — not 503 — once that local view runs dry, because the local
+cache learns of refills only from a successful sync. So a cached rule degrades
+into a stricter limiter rather than a closed one, and its flush errors are
+logged while the node keeps serving. `bench/run-outage.sh` puts both arms
+through the same kill-and-restart and records the difference per second.
+
+**A second decision that shares the name: no rule matched.** Traffic no
+configured rule covers gets **`200`** with `allowed: false, matched: false`.
+Unmatched is denied by default, but it is not a 429 and not a 503: the status
+and the `matched` field let the caller tell "no rule" apart from "over limit"
+and "store down". Deny-by-default is chosen because a limiter that silently
+admits everything it was never told about hides misconfiguration — a rule
+whose header value has a typo would otherwise pass every request and look
+healthy. The opposite default is correct where Limigo is an optional layer and
+"no rule" means "unlimited"; a caller in that position should key its own
+policy off `matched: false`, which the response carries for exactly this
+reason, rather than off `allowed`.
 
 ## Benchmarks
 
@@ -619,6 +677,7 @@ bench/run-throughput.sh   # §1, §1b, §3, §4, §5: control rows, Redis bound,
 bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: overshoot / consistency
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
 bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat
+bench/run-outage.sh       # failure mode: kill and restart Redis under load, per-second timeline for both arms
 ```
 
 `bench/run-microbench.sh` needs `benchstat` on `PATH`
