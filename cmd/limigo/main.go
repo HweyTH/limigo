@@ -8,14 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/hweyth/limigo/internal/admin"
 	"github.com/hweyth/limigo/internal/api"
 	"github.com/hweyth/limigo/internal/config"
 	"github.com/hweyth/limigo/internal/metrics"
@@ -27,6 +30,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
 )
 
 type options struct {
@@ -51,6 +55,60 @@ type options struct {
 	// tracingSampleRatio is the fraction of new traces recorded when tracing
 	// is on; traces with a sampled parent are always recorded.
 	tracingSampleRatio float64
+	// adminGRPCAddr and adminHTTPAddr are the Admin API's listeners (gRPC and
+	// its REST gateway), each on its own port and never the data plane's.
+	// Empty disables that listener.
+	adminGRPCAddr string
+	adminHTTPAddr string
+}
+
+// reloader is the one path by which the running rule set changes: re-read
+// the file, validate, compile, flush the outgoing engine's local caches to
+// the store, swap. The file watcher and the Admin API's ReloadRules both call
+// it, and the mutex keeps two triggers from interleaving their flush-and-swap
+// — two concurrent reloads could otherwise flush the same outgoing engine
+// twice or swap in an engine built from a stale read.
+type reloader struct {
+	mu         sync.Mutex
+	configPath string
+	st         rules.Store
+	metrics    *metrics.Metrics
+	holder     *rules.EngineHolder
+	stdout     io.Writer
+}
+
+// reload performs one reload and returns the number of rules now active.
+// The failure counter is bumped here so both triggers report alike; the
+// caller logs.
+func (r *reloader) reload(ctx context.Context) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	newCfg, err := config.Load(r.configPath)
+	if err != nil {
+		r.metrics.IncConfigReload(false)
+		return 0, fmt.Errorf("load config %q: %w", r.configPath, err)
+	}
+	if err := config.Validate(newCfg); err != nil {
+		r.metrics.IncConfigReload(false)
+		return 0, fmt.Errorf("validate config %q: %w", r.configPath, err)
+	}
+	newEngine, err := rules.Compile(newCfg, r.st, r.metrics)
+	if err != nil {
+		r.metrics.IncConfigReload(false)
+		return 0, fmt.Errorf("compile rules: %w", err)
+	}
+	// holder still points at the outgoing engine here, so this reconciles
+	// its pending local_cache admits with Redis before the swap makes them
+	// unreachable. A failed flush is logged, not fatal: the new rules are
+	// what the operator asked for, and the loss is bounded by one interval.
+	if err := r.holder.FlushLocalCaches(ctx); err != nil {
+		logf(r.stdout, "limigo: flush local caches before reload failed: %v\n", err)
+	}
+	r.holder.Store(newEngine)
+	r.metrics.IncConfigReload(true)
+	logf(r.stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), r.configPath)
+	return len(newCfg.Rules), nil
 }
 
 // serverTimeouts bounds how long an http.Server waits on a client at each
@@ -228,40 +286,42 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	rl := &reloader{configPath: opts.configPath, st: redisStore, metrics: m, holder: holder, stdout: stdout}
 	go func() {
-		reloadFailed := func(err error) {
-			m.IncConfigReload(false)
-			logf(stderr, "limigo: config reload failed: %v\n", err)
-		}
 		onChange := func() {
-			newCfg, err := config.Load(opts.configPath)
-			if err != nil {
-				reloadFailed(err)
-				return
+			if _, err := rl.reload(ctx); err != nil {
+				logf(stderr, "limigo: config reload failed: %v\n", err)
 			}
-			if err := config.Validate(newCfg); err != nil {
-				reloadFailed(err)
-				return
-			}
-			newEngine, err := rules.Compile(newCfg, redisStore, m)
-			if err != nil {
-				reloadFailed(err)
-				return
-			}
-			// holder still points at the outgoing engine here, so this reconciles
-			// its pending local_cache admits with Redis before the swap makes them
-			// unreachable.
-			if err := holder.FlushLocalCaches(ctx); err != nil {
-				logf(stderr, "limigo: flush local caches before reload failed: %v\n", err)
-			}
-			holder.Store(newEngine)
-			m.IncConfigReload(true)
-			logf(stdout, "config reloaded: %d rules from %s\n", len(newCfg.Rules), opts.configPath)
 		}
 		if err := config.Watch(ctx, opts.configPath, onChange); err != nil {
 			logf(stderr, "limigo: config watcher stopped: %v\n", err)
 		}
 	}()
+
+	// The Admin API: gRPC and its REST gateway, each on its own listener,
+	// answering from the same holder the data plane checks against and
+	// reloading through the same reloader the file watcher uses.
+	adminServer, err := admin.NewServer(holder, rl.reload)
+	if err != nil {
+		return fmt.Errorf("init admin API: %w", err)
+	}
+	var adminGRPC *grpc.Server
+	var adminGRPCListener net.Listener
+	if opts.adminGRPCAddr != "" {
+		adminGRPCListener, err = net.Listen("tcp", opts.adminGRPCAddr)
+		if err != nil {
+			return fmt.Errorf("listen for admin gRPC on %q: %w", opts.adminGRPCAddr, err)
+		}
+		adminGRPC = admin.NewGRPCServer(adminServer)
+	}
+	var adminHTTP *http.Server
+	if opts.adminHTTPAddr != "" {
+		gateway, err := admin.NewGatewayHandler(ctx, adminServer)
+		if err != nil {
+			return fmt.Errorf("init admin REST gateway: %w", err)
+		}
+		adminHTTP = newServer(opts.adminHTTPAddr, gateway, defaultServerTimeouts)
+	}
 
 	cacheFlushTicker := time.NewTicker(opts.cacheFlushInterval)
 	go func() {
@@ -291,6 +351,21 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		}()
 	}
 
+	var adminGRPCErr chan error
+	if adminGRPC != nil {
+		adminGRPCErr = make(chan error, 1)
+		go func() {
+			adminGRPCErr <- adminGRPC.Serve(adminGRPCListener)
+		}()
+	}
+	var adminHTTPErr chan error
+	if adminHTTP != nil {
+		adminHTTPErr = make(chan error, 1)
+		go func() {
+			adminHTTPErr <- adminHTTP.ListenAndServe()
+		}()
+	}
+
 	// The listener binds inside ListenAndServe, a few microseconds after this
 	// line; a health check that lands in that gap gets a refused connection,
 	// which reads as not-ready anyway.
@@ -305,6 +380,16 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	case err := <-metricsErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve metrics on %q: %w", opts.metricsAddr, err)
+		}
+		return nil
+	case err := <-adminGRPCErr:
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			return fmt.Errorf("serve admin gRPC on %q: %w", opts.adminGRPCAddr, err)
+		}
+		return nil
+	case err := <-adminHTTPErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve admin REST on %q: %w", opts.adminHTTPAddr, err)
 		}
 		return nil
 	case <-ctx.Done():
@@ -336,6 +421,17 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 				}
 				return fmt.Errorf("shutdown metrics server: %w", err)
 			}
+		}
+
+		// The control plane goes last: an operator watching a rollout can
+		// still ask a draining node what it is enforcing.
+		if adminHTTP != nil {
+			if err := adminHTTP.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("shutdown admin REST server: %w", err)
+			}
+		}
+		if adminGRPC != nil {
+			adminGRPC.GracefulStop()
 		}
 
 		if err := holder.FlushLocalCaches(shutdownCtx); err != nil {
@@ -384,6 +480,8 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	flags.DurationVar(&opts.drainDelay, "drain-delay", envDurationOrDefault(getenv, "LIMIGO_DRAIN_DELAY", 6*time.Second), "how long to keep serving after failing /readyz before closing the listener; cover one load-balancer health-check interval")
 	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", envOrDefault(getenv, "LIMIGO_TRACING_ENDPOINT", ""), "OTLP/HTTP collector URL for traces, e.g. http://jaeger:4318; empty disables tracing")
 	flags.Float64Var(&opts.tracingSampleRatio, "tracing-sample-ratio", envFloatOrDefault(getenv, "LIMIGO_TRACING_SAMPLE_RATIO", 1.0), "fraction of new traces to record when tracing is on, 0 to 1")
+	flags.StringVar(&opts.adminGRPCAddr, "admin-grpc-addr", envOrDefault(getenv, "LIMIGO_ADMIN_GRPC_ADDR", ":9092"), "Admin API gRPC listen address; empty disables the listener")
+	flags.StringVar(&opts.adminHTTPAddr, "admin-http-addr", envOrDefault(getenv, "LIMIGO_ADMIN_HTTP_ADDR", ":9093"), "Admin API REST gateway listen address; empty disables the listener")
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
 	// redisAddr keeps a default so the common single-node case needs no flag;
 	// that means "was it set?" cannot be read off the value alone. redisAddrSet
@@ -431,6 +529,18 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	}
 	if strings.TrimSpace(opts.httpAddr) == "" {
 		return opts, fmt.Errorf("HTTP address must not be empty")
+	}
+	for _, other := range []struct{ name, addr string }{
+		{"metrics address", opts.metricsAddr},
+		{"admin gRPC address", opts.adminGRPCAddr},
+		{"admin REST address", opts.adminHTTPAddr},
+	} {
+		if other.addr != "" && other.addr == opts.httpAddr {
+			return opts, fmt.Errorf("%s %q must not be the data-plane HTTP address; the admin and metrics surfaces never share the /v1/check listener", other.name, other.addr)
+		}
+	}
+	if opts.adminGRPCAddr != "" && opts.adminGRPCAddr == opts.adminHTTPAddr {
+		return opts, fmt.Errorf("admin gRPC and REST addresses must differ; both are %q", opts.adminGRPCAddr)
 	}
 	if opts.cacheFlushInterval <= 0 {
 		return opts, fmt.Errorf("cache flush interval must be greater than zero")

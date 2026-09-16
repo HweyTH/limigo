@@ -1,0 +1,110 @@
+// The Limigo Admin API: inspect the running rule set and a key's quota, and
+// trigger a rules reload. It serves the control plane only and never shares a
+// listener with the data plane (/v1/check).
+//
+// Regenerate Go code after editing with
+//
+//   go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
+//
+// from the repository root; CI fails if internal/gen is stale.
+syntax = "proto3";
+
+package limigo.admin.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/duration.proto";
+
+// AdminService is the operator-facing control plane of one Limigo node.
+//
+// Every RPC answers for the node it is called on. Rules are identical across
+// nodes by construction (every node loads the same file), but a locally
+// cached rule's quota state is not: see GetQuotaResponse.
+service AdminService {
+  // ListRules returns the rule set the node is currently enforcing, in match
+  // order, as compiled from its config file.
+  rpc ListRules(ListRulesRequest) returns (ListRulesResponse) {
+    option (google.api.http) = {get: "/v1/admin/rules"};
+  }
+
+  // GetQuota reports the quota state of one key under one rule without
+  // consuming any of it. It is a read of the authoritative store, so for a
+  // rule with node-local caching it lags every node's unflushed admits by up
+  // to one flush interval.
+  rpc GetQuota(GetQuotaRequest) returns (GetQuotaResponse) {
+    option (google.api.http) = {get: "/v1/admin/rules/{rule}/quota/{key}"};
+  }
+
+  // ReloadRules re-reads the node's config file and swaps the compiled rule
+  // set, the same path the file watcher takes on a change to the file:
+  // pending local-cache admits are flushed to the store before the swap, so
+  // a reload never drops them. It is a second trigger for an existing
+  // mechanism, not a way to change rules without changing the file.
+  rpc ReloadRules(ReloadRulesRequest) returns (ReloadRulesResponse) {
+    option (google.api.http) = {
+      post: "/v1/admin/rules:reload"
+      body: "*"
+    };
+  }
+}
+
+message ListRulesRequest {}
+
+message ListRulesResponse {
+  // Rules in match order; the first whose header matches a request wins.
+  repeated Rule rules = 1;
+}
+
+// Rule is one entry of the compiled rule set.
+message Rule {
+  // Name identifies the rule in metrics, logs, and the RateLimit-Policy
+  // response field.
+  string name = 1;
+  // Header is the request header the rule matches on.
+  string header = 2;
+  // Value is the header value that activates the rule.
+  string value = 3;
+  // Algorithm is one of fixed_window, sliding_window, token_bucket,
+  // leaky_bucket.
+  string algorithm = 4;
+  // Limit is the quota in requests: limit for the window algorithms and
+  // leaky bucket, capacity for token bucket.
+  int64 limit = 5;
+  // Window is the period limit applies to. Unset for token bucket, which
+  // refills continuously rather than per window.
+  google.protobuf.Duration window = 6;
+  // LocalCache reports whether the rule decides from a node-local cache
+  // reconciled with the store on a flush interval.
+  bool local_cache = 7;
+}
+
+message GetQuotaRequest {
+  // Rule is the rule name; unknown names fail with NOT_FOUND.
+  string rule = 1;
+  // Key is the caller identity the quota is tracked for, as sent in
+  // /v1/check's body.
+  string key = 2;
+}
+
+message GetQuotaResponse {
+  // Rule is the rule the quota belongs to.
+  Rule rule = 1;
+  // Key is the inspected key.
+  string key = 2;
+  // Limit is the rule's quota in requests.
+  int64 limit = 3;
+  // Remaining is how many requests the key could admit right now, from the
+  // authoritative store's state.
+  int64 remaining = 4;
+  // ResetAfter is how long until the key's quota is fully restored; unset
+  // when the key holds no state.
+  google.protobuf.Duration reset_after = 5;
+  // WouldAllow reports whether a request arriving now would be admitted.
+  bool would_allow = 6;
+}
+
+message ReloadRulesRequest {}
+
+message ReloadRulesResponse {
+  // RuleCount is the number of rules in the newly loaded set.
+  int64 rule_count = 1;
+}

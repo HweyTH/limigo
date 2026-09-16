@@ -1,0 +1,17 @@
+# buf configuration for the Admin API's Protobuf definitions.
+#
+#   go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
+#
+# regenerates internal/gen from proto/. CI checks the generated code is
+# current, so the .proto is the source of truth and the Go is never edited.
+version: v2
+modules:
+  - path: proto
+deps:
+  - buf.build/googleapis/googleapis
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

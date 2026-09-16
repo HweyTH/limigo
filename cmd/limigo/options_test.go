@@ -112,3 +112,35 @@ func TestNewRedisClientSelectsType(t *testing.T) {
 		}
 	})
 }
+
+// TestParseOptionsListenerSeparation pins the control-plane rule: the admin
+// and metrics surfaces never share the data plane's listener, and the two
+// admin listeners never share each other's.
+func TestParseOptionsListenerSeparation(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantErrMatch string
+	}{
+		{name: "defaults are four distinct ports"},
+		{name: "admin gRPC on the data-plane port", args: []string{"-admin-grpc-addr", ":8080"}, wantErrMatch: "must not be the data-plane HTTP address"},
+		{name: "admin REST on the data-plane port", args: []string{"-admin-http-addr", ":8080"}, wantErrMatch: "must not be the data-plane HTTP address"},
+		{name: "metrics on the data-plane port", args: []string{"-metrics-addr", ":8080"}, wantErrMatch: "must not be the data-plane HTTP address"},
+		{name: "admin gRPC and REST on one port", args: []string{"-admin-grpc-addr", ":9099", "-admin-http-addr", ":9099"}, wantErrMatch: "must differ"},
+		{name: "admin listeners can be disabled", args: []string{"-admin-grpc-addr", "", "-admin-http-addr", ""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseOptions(tt.args, func(string) string { return "" }, io.Discard)
+			if tt.wantErrMatch == "" {
+				if err != nil {
+					t.Fatalf("parseOptions: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrMatch) {
+				t.Fatalf("parseOptions error = %v, want one containing %q", err, tt.wantErrMatch)
+			}
+		})
+	}
+}

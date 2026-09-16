@@ -99,3 +99,14 @@ type LatencyRecorder interface {
 	ObserveRedisLatency(algorithm string, d time.Duration)
 	ObserveLuaExecution(algorithm string, d time.Duration)
 }
+
+// PeekStore reads a key's quota state without consuming any of it, for
+// inspection: the Verdict describes what a request arriving now would see.
+// Implementations run the same algorithm logic as the Allow methods so the
+// two can never disagree about a key.
+type PeekStore interface {
+	PeekFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error)
+	PeekSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error)
+	PeekTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (Verdict, error)
+	PeekLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (Verdict, error)
+}

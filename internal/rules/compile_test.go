@@ -85,6 +85,32 @@ func (s *fakeStore) AllowLeakyBucket(ctx context.Context, key string, limit int6
 	return v, s.err
 }
 
+func (s *fakeStore) PeekFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (store.Verdict, error) {
+	s.lastCall = "fixed_window_peek"
+	s.lastKey = key
+	return s.verdict(), s.err
+}
+
+func (s *fakeStore) PeekSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (store.Verdict, error) {
+	s.lastCall = "sliding_window_peek"
+	s.lastKey = key
+	return s.verdict(), s.err
+}
+
+func (s *fakeStore) PeekTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (store.Verdict, error) {
+	s.lastCall = "token_bucket_peek"
+	s.lastKey = key
+	return s.verdict(), s.err
+}
+
+func (s *fakeStore) PeekLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (store.Verdict, error) {
+	s.lastCall = "leaky_bucket_peek"
+	s.lastKey = key
+	v := s.verdict()
+	v.RetryAfter = s.leakyRetryAfter
+	return v, s.err
+}
+
 func (s *fakeStore) SyncFixedWindow(ctx context.Context, key string, delta int64, window time.Duration) (int64, error) {
 	s.syncCalls++
 	s.lastSyncKey = key
@@ -953,4 +979,105 @@ func TestCheckReportsLocalQuotaForCachedRules(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRulesAndInspect covers the inspection surface the Admin API is built
+// on: Rules lists the compiled set in match order with its static quota,
+// and Inspect reads a key's quota through the store's non-consuming peek
+// path — the authoritative view, even for a locally cached rule.
+func TestRulesAndInspect(t *testing.T) {
+	cfg := &config.Config{
+		Rules: []config.Rule{
+			{
+				Name:        "fw",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "fw"},
+				Algorithm:   config.FixedWindow,
+				FixedWindow: &config.WindowLimit{Limit: 100, Window: time.Minute},
+			},
+			{
+				Name:        "cached-tb",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "cached"},
+				Algorithm:   config.TokenBucket,
+				LocalCache:  true,
+				TokenBucket: &config.TokenBucketConfig{Capacity: 1000, Rate: 200},
+			},
+			{
+				Name:        "lb",
+				Match:       config.Match{HeaderName: "X-Plan", Value: "lb"},
+				Algorithm:   config.LeakyBucket,
+				LeakyBucket: &config.LeakyBucketConfig{Limit: 600, Window: time.Minute, Burst: 10},
+			},
+		},
+	}
+	store := &fakeStore{allow: true, remaining: 7, reset: 3 * time.Second, leakyRetryAfter: 0}
+	engine, err := Compile(cfg, store, newFakeFillRatioRecorder())
+	if err != nil {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+
+	t.Run("Rules lists the compiled set in order", func(t *testing.T) {
+		want := []RuleInfo{
+			{Name: "fw", HeaderName: "X-Plan", Value: "fw", Algorithm: config.FixedWindow, Limit: 100, Window: time.Minute},
+			{Name: "cached-tb", HeaderName: "X-Plan", Value: "cached", Algorithm: config.TokenBucket, Limit: 1000, LocalCache: true},
+			{Name: "lb", HeaderName: "X-Plan", Value: "lb", Algorithm: config.LeakyBucket, Limit: 600, Window: time.Minute},
+		}
+		got := engine.Rules()
+		if len(got) != len(want) {
+			t.Fatalf("Rules() returned %d rules, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("Rules()[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	tests := []struct {
+		rule     string
+		wantCall string
+	}{
+		{rule: "fw", wantCall: "fixed_window_peek"},
+		{rule: "cached-tb", wantCall: "token_bucket_peek"},
+		{rule: "lb", wantCall: "leaky_bucket_peek"},
+	}
+	for _, tt := range tests {
+		t.Run("Inspect "+tt.rule+" peeks without consuming", func(t *testing.T) {
+			store.lastCall = ""
+			decision, err := engine.Inspect(context.Background(), tt.rule, "client-1")
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			if store.lastCall != tt.wantCall {
+				t.Fatalf("store call = %q, want %q", store.lastCall, tt.wantCall)
+			}
+			if store.lastKey != "limigo:"+tt.rule+":client-1" {
+				t.Fatalf("store key = %q", store.lastKey)
+			}
+			if !decision.Matched || decision.RuleName != tt.rule || !decision.Allowed || decision.Remaining != 7 || decision.Reset != 3*time.Second {
+				t.Fatalf("Inspect = %+v, want matched %s, allowed, remaining 7, reset 3s", decision, tt.rule)
+			}
+		})
+	}
+
+	t.Run("Inspect unknown rule", func(t *testing.T) {
+		_, err := engine.Inspect(context.Background(), "nope", "client-1")
+		if !errors.Is(err, ErrRuleNotFound) {
+			t.Fatalf("error = %v, want ErrRuleNotFound", err)
+		}
+	})
+
+	t.Run("Inspect surfaces store errors with the rule's static quota", func(t *testing.T) {
+		failing := &fakeStore{err: errors.New("redis down")}
+		engine, err := Compile(cfg, failing, newFakeFillRatioRecorder())
+		if err != nil {
+			t.Fatalf("unexpected compile error: %v", err)
+		}
+		decision, err := engine.Inspect(context.Background(), "fw", "client-1")
+		if err == nil {
+			t.Fatal("expected the store error")
+		}
+		if decision.Limit != 100 || decision.Window != time.Minute {
+			t.Fatalf("decision on error = %+v, want the static limit and window", decision)
+		}
+	})
 }

@@ -20,16 +20,32 @@
 -- KEYS[1] - rate limit key
 -- ARGV[1] - maximum number of requests allowed per window
 -- ARGV[2] - window duration in milliseconds
+-- ARGV[3] - optional; 'peek' reports the state a request arriving now would
+--           see without recording one (the Admin API's quota inspection).
+--           The same script answers both so the two cannot drift apart.
 
 local t0 = os.clock()
 
-local count = redis.call('INCR', KEYS[1])
+local limit = tonumber(ARGV[1])
+local peek = ARGV[3] == 'peek'
 
-if count == 1 then 
-    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+local count
+if peek then
+    count = tonumber(redis.call('GET', KEYS[1])) or 0
+else
+    count = redis.call('INCR', KEYS[1])
+    if count == 1 then
+        redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+    end
 end
 
-local limit = tonumber(ARGV[1])
+-- On the write path count includes this request, so it is allowed while
+-- count <= limit; a peek asks whether one more would fit, count < limit.
+-- Either way remaining is the admits still possible after what count holds.
+local allowed = 0
+if (peek and count < limit) or (not peek and count <= limit) then
+    allowed = 1
+end
 local remaining = limit - count
 if remaining < 0 then
     remaining = 0
@@ -45,8 +61,4 @@ end
 
 local lua_us = math.floor((os.clock() - t0) * 1000000)
 
-if count <= limit then
-    return {1, lua_us, remaining, reset_ms}
-else
-    return {0, lua_us, remaining, reset_ms}
-end
+return {allowed, lua_us, remaining, reset_ms}

@@ -34,3 +34,13 @@ func (holder *EngineHolder) Check(ctx context.Context, key string, headerValue f
 func (holder *EngineHolder) FlushLocalCaches(ctx context.Context) error {
 	return holder.engine.Load().FlushLocalCaches(ctx)
 }
+
+// Rules delegates to the currently active engine's Rules.
+func (holder *EngineHolder) Rules() []RuleInfo {
+	return holder.engine.Load().Rules()
+}
+
+// Inspect delegates to the currently active engine's Inspect.
+func (holder *EngineHolder) Inspect(ctx context.Context, ruleName, key string) (Decision, error) {
+	return holder.engine.Load().Inspect(ctx, ruleName, key)
+}

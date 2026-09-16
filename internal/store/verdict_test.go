@@ -272,3 +272,107 @@ func TestLuaExecutionTimeIsMeasured(t *testing.T) {
 		})
 	}
 }
+
+// TestPeekDoesNotConsume pins the inspection contract for every algorithm:
+// a peek reports what the next request would see — the same Allowed and
+// Remaining that Allow then actually returns before it consumes anything —
+// and peeking any number of times changes nothing.
+func TestPeekDoesNotConsume(t *testing.T) {
+	store := newTestRedisStore()
+	ctx := context.Background()
+
+	type algo struct {
+		name  string
+		peek  func(key string) (Verdict, error)
+		allow func(key string) (Verdict, error)
+		quota int64
+	}
+	algos := []algo{
+		{
+			name:  "fixed window",
+			peek:  func(k string) (Verdict, error) { return store.PeekFixedWindow(ctx, k, 3, 5*time.Second) },
+			allow: func(k string) (Verdict, error) { return store.AllowFixedWindow(ctx, k, 3, 5*time.Second) },
+			quota: 3,
+		},
+		{
+			name:  "sliding window",
+			peek:  func(k string) (Verdict, error) { return store.PeekSlidingWindow(ctx, k, 3, 5*time.Second) },
+			allow: func(k string) (Verdict, error) { return store.AllowSlidingWindow(ctx, k, 3, 5*time.Second) },
+			quota: 3,
+		},
+		{
+			name:  "token bucket",
+			peek:  func(k string) (Verdict, error) { return store.PeekTokenBucket(ctx, k, 3, 1) },
+			allow: func(k string) (Verdict, error) { return store.AllowTokenBucket(ctx, k, 3, 1) },
+			quota: 3,
+		},
+		{
+			name:  "leaky bucket",
+			peek:  func(k string) (Verdict, error) { return store.PeekLeakyBucket(ctx, k, 10, 5*time.Second, 3) },
+			allow: func(k string) (Verdict, error) { return store.AllowLeakyBucket(ctx, k, 10, 5*time.Second, 3) },
+			quota: 3,
+		},
+	}
+	for _, a := range algos {
+		t.Run(a.name, func(t *testing.T) {
+			key := redisTestKey(t, "peek")
+
+			// A fresh key: peek says the full quota is available, repeatedly.
+			for i := range 3 {
+				v, err := a.peek(key)
+				if err != nil {
+					t.Fatalf("peek %d on fresh key: %v", i+1, err)
+				}
+				if !v.Allowed || v.Remaining != a.quota {
+					t.Fatalf("peek %d on fresh key = %+v, want allowed with %d remaining", i+1, v, a.quota)
+				}
+			}
+
+			// Interleave: what peek predicts, allow then delivers.
+			for i := int64(1); i <= a.quota; i++ {
+				predicted, err := a.peek(key)
+				if err != nil {
+					t.Fatalf("peek before admit %d: %v", i, err)
+				}
+				actual, err := a.allow(key)
+				if err != nil {
+					t.Fatalf("admit %d: %v", i, err)
+				}
+				if predicted.Allowed != actual.Allowed {
+					t.Fatalf("admit %d: peek predicted allowed=%v, allow returned %v", i, predicted.Allowed, actual.Allowed)
+				}
+				// Peek's remaining includes the request about to be made; allow's
+				// remaining is after it.
+				if predicted.Remaining != actual.Remaining+1 {
+					t.Fatalf("admit %d: peek remaining %d, allow remaining %d; want peek = allow + 1", i, predicted.Remaining, actual.Remaining)
+				}
+			}
+
+			// Exhausted: peek says so, and still consumes nothing.
+			v, err := a.peek(key)
+			if err != nil {
+				t.Fatalf("peek when exhausted: %v", err)
+			}
+			if v.Allowed || v.Remaining != 0 {
+				t.Fatalf("peek when exhausted = %+v, want denied with 0 remaining", v)
+			}
+			if v.Reset <= 0 {
+				t.Fatalf("peek when exhausted: Reset = %s, want > 0 while the key holds state", v.Reset)
+			}
+		})
+	}
+
+	t.Run("leaky bucket peek reports retry-after when denied", func(t *testing.T) {
+		key := redisTestKey(t, "peek-gcra")
+		if _, err := store.AllowLeakyBucket(ctx, key, 10, 5*time.Second, 1); err != nil {
+			t.Fatalf("allow: %v", err)
+		}
+		v, err := store.PeekLeakyBucket(ctx, key, 10, 5*time.Second, 1)
+		if err != nil {
+			t.Fatalf("peek: %v", err)
+		}
+		if v.Allowed || v.RetryAfter <= 0 || v.RetryAfter > 500*time.Millisecond {
+			t.Fatalf("peek = %+v, want denied with retry-after in (0, 500ms]", v)
+		}
+	})
+}

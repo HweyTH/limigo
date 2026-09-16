@@ -23,7 +23,12 @@ type Store interface {
 	store.LeakyBucketStore
 	store.FixedWindowSyncStore
 	store.TokenBucketSyncStore
+	store.PeekStore
 }
+
+// ErrRuleNotFound is returned by Inspect for a rule name the engine does not
+// have.
+var ErrRuleNotFound = errors.New("rule not found")
 
 // FillRatioRecorder receives the mean fill ratio of a rule's node-local token
 // buckets, sampled on every flush. ClearTokenBucketFillRatio removes a rule's
@@ -45,9 +50,16 @@ type CompiledRule struct {
 	// Decision as the policy a caller is being held to: limit requests per
 	// window for the window algorithms and leaky bucket; capacity with a
 	// zero window for token bucket, which has no window to report.
-	limit  int64
-	window time.Duration
-	allow  func(ctx context.Context, key string) (store.Verdict, error)
+	limit      int64
+	window     time.Duration
+	algorithm  config.Algorithm
+	localCache bool
+	allow      func(ctx context.Context, key string) (store.Verdict, error)
+	// peek reads key's authoritative quota state from the Store without
+	// consuming any of it. For a locally cached rule this is the store's
+	// view, which lags every node's unflushed admits by up to one flush
+	// interval; the local cache itself is not consulted.
+	peek func(ctx context.Context, key string) (store.Verdict, error)
 	// flush reconciles this rule's node-local cache with the backing Store.
 	// It is nil unless the rule opted into local caching (config.Rule.LocalCache).
 	flush func(ctx context.Context) error
@@ -138,13 +150,16 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 			return compileBatchingFixedWindow(rule, st, limit, window), nil
 		}
 		return &CompiledRule{
-			Name:   rule.Name,
-			Match:  rule.Match,
-			limit:  limit,
-			window: window,
+			Name:      rule.Name,
+			Match:     rule.Match,
+			limit:     limit,
+			window:    window,
+			algorithm: rule.Algorithm,
 			allow: func(ctx context.Context, key string) (store.Verdict, error) {
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowFixedWindow(ctx, storeKey, limit, window)
+				return st.AllowFixedWindow(ctx, storeKey(rule.Name, key), limit, window)
+			},
+			peek: func(ctx context.Context, key string) (store.Verdict, error) {
+				return st.PeekFixedWindow(ctx, storeKey(rule.Name, key), limit, window)
 			},
 		}, nil
 
@@ -154,13 +169,16 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 		}
 		limit, window := rule.SlidingWindow.Limit, rule.SlidingWindow.Window
 		return &CompiledRule{
-			Name:   rule.Name,
-			Match:  rule.Match,
-			limit:  limit,
-			window: window,
+			Name:      rule.Name,
+			Match:     rule.Match,
+			limit:     limit,
+			window:    window,
+			algorithm: rule.Algorithm,
 			allow: func(ctx context.Context, key string) (store.Verdict, error) {
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowSlidingWindow(ctx, storeKey, limit, window)
+				return st.AllowSlidingWindow(ctx, storeKey(rule.Name, key), limit, window)
+			},
+			peek: func(ctx context.Context, key string) (store.Verdict, error) {
+				return st.PeekSlidingWindow(ctx, storeKey(rule.Name, key), limit, window)
 			},
 		}, nil
 
@@ -173,12 +191,15 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 			return compileBatchingTokenBucket(rule, st, capacity, rate, recorder), nil
 		}
 		return &CompiledRule{
-			Name:  rule.Name,
-			Match: rule.Match,
-			limit: tokenBucketLimit(capacity),
+			Name:      rule.Name,
+			Match:     rule.Match,
+			limit:     tokenBucketLimit(capacity),
+			algorithm: rule.Algorithm,
 			allow: func(ctx context.Context, key string) (store.Verdict, error) {
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowTokenBucket(ctx, storeKey, capacity, rate)
+				return st.AllowTokenBucket(ctx, storeKey(rule.Name, key), capacity, rate)
+			},
+			peek: func(ctx context.Context, key string) (store.Verdict, error) {
+				return st.PeekTokenBucket(ctx, storeKey(rule.Name, key), capacity, rate)
 			},
 		}, nil
 
@@ -188,13 +209,16 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 		}
 		limit, window, burst := rule.LeakyBucket.Limit, rule.LeakyBucket.Window, rule.LeakyBucket.Burst
 		return &CompiledRule{
-			Name:   rule.Name,
-			Match:  rule.Match,
-			limit:  limit,
-			window: window,
+			Name:      rule.Name,
+			Match:     rule.Match,
+			limit:     limit,
+			window:    window,
+			algorithm: rule.Algorithm,
 			allow: func(ctx context.Context, key string) (store.Verdict, error) {
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
-				return st.AllowLeakyBucket(ctx, storeKey, limit, window, burst)
+				return st.AllowLeakyBucket(ctx, storeKey(rule.Name, key), limit, window, burst)
+			},
+			peek: func(ctx context.Context, key string) (store.Verdict, error) {
+				return st.PeekLeakyBucket(ctx, storeKey(rule.Name, key), limit, window, burst)
 			},
 		}, nil
 
@@ -211,15 +235,20 @@ func compileRule(rule config.Rule, st Store, recorder FillRatioRecorder) (*Compi
 func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window time.Duration) *CompiledRule {
 	manager := limiter.NewBatchingFixedWindowManager(limit)
 	return &CompiledRule{
-		Name:   rule.Name,
-		Match:  rule.Match,
-		limit:  limit,
-		window: window,
+		Name:       rule.Name,
+		Match:      rule.Match,
+		limit:      limit,
+		window:     window,
+		algorithm:  rule.Algorithm,
+		localCache: true,
 		// Remaining is this node's local view; Reset is left zero because the
 		// local cache does not track when the window rolls over in the store.
 		allow: func(ctx context.Context, key string) (store.Verdict, error) {
 			allowed, remaining := manager.Admit(ctx, key)
 			return store.Verdict{Allowed: allowed, Remaining: remaining}, nil
+		},
+		peek: func(ctx context.Context, key string) (store.Verdict, error) {
+			return st.PeekFixedWindow(ctx, storeKey(rule.Name, key), limit, window)
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -230,7 +259,7 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 				if delta == 0 && !bw.Exhausted() {
 					continue
 				}
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				storeKey := storeKey(rule.Name, key)
 				total, err := st.SyncFixedWindow(ctx, storeKey, delta, window)
 				if err != nil {
 					errs = errors.Join(errs, fmt.Errorf("sync fixed window %q: %w", storeKey, err))
@@ -251,14 +280,19 @@ func compileBatchingFixedWindow(rule config.Rule, st Store, limit int64, window 
 func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float64, recorder FillRatioRecorder) *CompiledRule {
 	manager := limiter.NewBatchingTokenBucketManager(capacity, rate)
 	return &CompiledRule{
-		Name:  rule.Name,
-		Match: rule.Match,
-		limit: tokenBucketLimit(capacity),
+		Name:       rule.Name,
+		Match:      rule.Match,
+		limit:      tokenBucketLimit(capacity),
+		algorithm:  rule.Algorithm,
+		localCache: true,
 		// Remaining is this node's local view; Reset is left zero because the
 		// local cache does not simulate refill between flushes.
 		allow: func(ctx context.Context, key string) (store.Verdict, error) {
 			allowed, remaining := manager.Admit(ctx, key)
 			return store.Verdict{Allowed: allowed, Remaining: remaining}, nil
+		},
+		peek: func(ctx context.Context, key string) (store.Verdict, error) {
+			return st.PeekTokenBucket(ctx, storeKey(rule.Name, key), capacity, rate)
 		},
 		flush: func(ctx context.Context) error {
 			var errs error
@@ -272,7 +306,7 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 				if delta == 0 && !tb.Exhausted() {
 					continue
 				}
-				storeKey := fmt.Sprintf("limigo:%s:%s", rule.Name, key)
+				storeKey := storeKey(rule.Name, key)
 				remaining, err := st.SyncTokenBucket(ctx, storeKey, delta, capacity, rate)
 				if err != nil {
 					errs = errors.Join(errs, fmt.Errorf("sync token bucket %q: %w", storeKey, err))
@@ -288,6 +322,13 @@ func compileBatchingTokenBucket(rule config.Rule, st Store, capacity, rate float
 			return errs
 		},
 	}
+}
+
+// storeKey is the one place a rule's Redis key is spelled: the rule name
+// and the caller key under a fixed prefix, with no hash tag (see the
+// README's single-key Lua decision).
+func storeKey(rule, key string) string {
+	return fmt.Sprintf("limigo:%s:%s", rule, key)
 }
 
 // tokenBucketLimit is the quota a token bucket reports: its capacity, in
@@ -368,4 +409,63 @@ func (e *Engine) Check(ctx context.Context, key string, headerValue func(string)
 		}
 	}
 	return Decision{Allowed: false, Matched: false}, nil
+}
+
+// RuleInfo describes one compiled rule for inspection: what it matches,
+// which algorithm it runs, and the static quota it enforces.
+type RuleInfo struct {
+	Name       string
+	HeaderName string
+	Value      string
+	Algorithm  config.Algorithm
+	// Limit and Window are as on Decision: the quota in requests, and the
+	// period it applies to (zero for token bucket).
+	Limit      int64
+	Window     time.Duration
+	LocalCache bool
+}
+
+// Rules returns the compiled rules in match order.
+func (e *Engine) Rules() []RuleInfo {
+	infos := make([]RuleInfo, 0, len(e.compiledRules))
+	for _, rule := range e.compiledRules {
+		infos = append(infos, RuleInfo{
+			Name:       rule.Name,
+			HeaderName: rule.Match.HeaderName,
+			Value:      rule.Match.Value,
+			Algorithm:  rule.algorithm,
+			Limit:      rule.limit,
+			Window:     rule.window,
+			LocalCache: rule.localCache,
+		})
+	}
+	return infos
+}
+
+// Inspect reports key's quota under the rule named ruleName without
+// consuming any of it: Allowed is whether a request arriving now would be
+// admitted, Remaining how many could be. It reads the authoritative store,
+// so for a locally cached rule it lags unflushed admits on every node by up
+// to one flush interval. It returns ErrRuleNotFound for an unknown rule.
+func (e *Engine) Inspect(ctx context.Context, ruleName, key string) (Decision, error) {
+	for _, rule := range e.compiledRules {
+		if rule.Name != ruleName {
+			continue
+		}
+		verdict, err := rule.peek(ctx, key)
+		if err != nil {
+			return Decision{Matched: true, RuleName: rule.Name, Limit: rule.limit, Window: rule.window}, err
+		}
+		return Decision{
+			Allowed:    verdict.Allowed,
+			Matched:    true,
+			RuleName:   rule.Name,
+			RetryAfter: verdict.RetryAfter,
+			Limit:      rule.limit,
+			Window:     rule.window,
+			Remaining:  verdict.Remaining,
+			Reset:      verdict.Reset,
+		}, nil
+	}
+	return Decision{}, fmt.Errorf("%w: %q", ErrRuleNotFound, ruleName)
 }

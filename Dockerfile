@@ -22,5 +22,6 @@ COPY --from=builder /out/limigo ./limigo
 COPY --from=builder /out/healthcheck ./healthcheck
 COPY config.example.yaml ./config.example.yaml
 
-EXPOSE 8080 9091
+# 8080 data plane, 9091 metrics, 9092 admin gRPC, 9093 admin REST gateway.
+EXPOSE 8080 9091 9092 9093
 ENTRYPOINT [ "./limigo" ]

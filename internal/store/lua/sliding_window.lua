@@ -20,6 +20,9 @@
 -- KEYS[1] - rate limit key (sorted set)
 -- ARGV[1] - maximum number of requests allowed per window
 -- ARGV[2] - window duration in milliseconds
+-- ARGV[3] - optional; 'peek' reports the state a request arriving now would
+--           see without recording one (the Admin API's quota inspection):
+--           it counts the live window instead of evicting and adding.
 local t0 = os.clock()
 
 local time = redis.call('TIME')
@@ -28,19 +31,31 @@ local now_ms = time[1] * 1000 + math.floor(time[2]/1000)
 
 local window_start = now_ms - tonumber(ARGV[2])
 
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start)
-
-local num_requests = redis.call('ZCARD', KEYS[1])
-
 local limit = tonumber(ARGV[1])
+local peek = ARGV[3] == 'peek'
 local allowed = 0
+local num_requests
+local oldest
 
-if num_requests < limit then
-    local member = tostring(time[1]) .. ':' .. tostring(time[2])
-    redis.call('ZADD', KEYS[1], now_ms, member)
-    redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
-    allowed = 1
-    num_requests = num_requests + 1
+if peek then
+    -- Entries at or before window_start are what the write path would evict;
+    -- count strictly after it, and read the oldest survivor for reset.
+    num_requests = redis.call('ZCOUNT', KEYS[1], '(' .. window_start, '+inf')
+    if num_requests < limit then
+        allowed = 1
+    end
+    oldest = redis.call('ZRANGEBYSCORE', KEYS[1], '(' .. window_start, '+inf', 'WITHSCORES', 'LIMIT', 0, 1)
+else
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', window_start)
+    num_requests = redis.call('ZCARD', KEYS[1])
+    if num_requests < limit then
+        local member = tostring(time[1]) .. ':' .. tostring(time[2])
+        redis.call('ZADD', KEYS[1], now_ms, member)
+        redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[2]))
+        allowed = 1
+        num_requests = num_requests + 1
+    end
+    oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 end
 
 local remaining = limit - num_requests
@@ -50,7 +65,6 @@ end
 
 -- The oldest entry's score plus the window is when it will be evicted.
 local reset_ms = 0
-local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 if oldest[2] then
     reset_ms = tonumber(oldest[2]) + tonumber(ARGV[2]) - now_ms
     if reset_ms < 0 then

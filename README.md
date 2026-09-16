@@ -110,6 +110,11 @@ Readiness deliberately does not probe Redis: a store outage already shows as
 fail-closed 503s per rule, and failing readiness on it too would pull every
 node out of the pool at once with less to show for it.
 
+A control plane sits beside the data plane on every node — the
+[Admin API](#admin-api), gRPC on `:9092` and REST on `:9093` — to list the
+rules a node is enforcing, inspect a key's quota without spending it, and
+trigger a reload.
+
 ## Rate limiting algorithms
 
 Four algorithms behind one interface, each with a different trade-off between
@@ -485,6 +490,57 @@ mechanical: a top-level `limiter/` package exporting the plain algorithms
 only, runnable `Example` functions, and the compatibility promise stated in
 the package doc. The batching types stay internal until their contract has
 settled.
+
+## Admin API
+
+Each node exposes a control plane on two listeners of its own — gRPC on
+`:9092`, a REST gateway on `:9093` — never on the data plane's `:8080`. The
+contract is [`proto/limigo/admin/v1/admin.proto`](proto/limigo/admin/v1/admin.proto);
+the Go stubs and gateway under `internal/gen/` are generated from it with
+[buf](https://buf.build) and CI fails if they are stale.
+
+| RPC | REST | What it does |
+|---|---|---|
+| `ListRules` | `GET /v1/admin/rules` | the rule set this node is enforcing, in match order, with each rule's algorithm and static quota |
+| `GetQuota` | `GET /v1/admin/rules/{rule}/quota/{key}` | a key's quota under a rule — `remaining`, `reset_after`, `would_allow` — **without consuming any of it** |
+| `ReloadRules` | `POST /v1/admin/rules:reload` | re-read the config file and swap the rule set: the same path the file watcher takes, including the flush of pending local-cache admits before the swap |
+
+```bash
+# From inside the compose network; `limigo` resolves to any replica.
+docker run --rm --network limigo_default curlimages/curl:8.10.1 \
+  -s http://limigo:9093/v1/admin/rules/free-tier-fixed-window/quota/user-123
+```
+
+```json
+{"rule":{"name":"free-tier-fixed-window","header":"X-Plan","value":"free","algorithm":"fixed_window","limit":"100","window":"60s","localCache":false},
+ "key":"user-123","limit":"100","remaining":"99","resetAfter":"59.941s","wouldAllow":true}
+```
+
+**Inspection never consumes.** `GetQuota` runs the rule's own Lua script in a
+read-only `peek` mode — the same script that decides `/v1/check`, so the two
+cannot drift — and reports what a request arriving now would see. Ask ten
+times, get the same answer. For a rule with `local_cache: true` the answer is
+the store's view, which lags every node's unflushed admits by up to one flush
+interval; the response carries `localCache: true` so a reader knows to expect
+that.
+
+**Reload is a second trigger, not a second mechanism.** `ReloadRules` calls
+the same serialised reload the `fsnotify` watcher calls, so an API-triggered
+reload and a file-triggered one cannot interleave, and neither can lose the
+pending admits the other was about to flush. A file that fails to load,
+validate or compile leaves the running rules untouched and comes back as
+`FAILED_PRECONDITION` (HTTP 400) naming the offending rule.
+
+**Deliberately not built: `OverrideLimit`.** A runtime mutation of a rule's
+limit is the obvious third RPC and it is left out on purpose. Every other path
+to changing a limit goes through the config file, which is reviewable,
+version-controlled and identical on every node. A mutable override is a second
+source of truth for the same state: it has to be reconciled with the next file
+reload (does the override survive it? on which nodes?), and it makes "what is
+this node enforcing" a question with two answers. Until that reconciliation is
+designed, the honest API is one that can *show* the limit and *reload* it, not
+one that can quietly diverge from the file. `ListRules` is the audit trail
+that makes the file's word final.
 
 ## Tracing
 
@@ -886,6 +942,7 @@ Once the containers are healthy:
 | Prometheus | http://localhost:9090 | discovers and scrapes every Limigo replica every 5s |
 | Grafana | http://localhost:3000 | login `admin` / `admin`; the "Limigo" dashboard is pre-loaded |
 | Jaeger | http://localhost:16686 | only with `-f docker-compose.tracing.yml` (see [Tracing](#tracing)) |
+| Admin API | `limigo:9093` (REST), `limigo:9092` (gRPC) | per replica, inside the compose network; not published on the host, since a host port cannot map to N replicas (see [Admin API](#admin-api)) |
 
 Limigo binds no fixed host ports. Traefik is the only entry point, so the API
 stays at one address however many replicas run. Scale with:
@@ -970,6 +1027,8 @@ default. Both are configurable by flag or environment variable:
 | `-drain-delay` | `LIMIGO_DRAIN_DELAY` | `6s` | on `SIGTERM`, how long to keep serving after `/readyz` starts returning 503, so the load balancer's next health check routes new requests elsewhere; cover one check interval |
 | `-tracing-endpoint` | `LIMIGO_TRACING_ENDPOINT` | — | OTLP/HTTP collector URL, e.g. `http://jaeger:4318`; empty (the default) disables tracing entirely |
 | `-tracing-sample-ratio` | `LIMIGO_TRACING_SAMPLE_RATIO` | `1` | fraction of new traces recorded when tracing is on, `0`–`1` |
+| `-admin-grpc-addr` | `LIMIGO_ADMIN_GRPC_ADDR` | `:9092` | Admin API gRPC listen address; empty disables it |
+| `-admin-http-addr` | `LIMIGO_ADMIN_HTTP_ADDR` | `:9093` | Admin API REST gateway listen address; empty disables it |
 | `-cache-flush-interval` | `LIMIGO_CACHE_FLUSH_INTERVAL` | `10ms` | how often `local_cache: true` rules sync to Redis |
 
 Write your own rules by copying `config.example.yaml`; the

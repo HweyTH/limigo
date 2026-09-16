@@ -102,17 +102,22 @@ func (store *RedisStore) exec(ctx context.Context, algorithm string, script *red
 		} else {
 			// Emitted even at zero length: a script that ran inside one
 			// microsecond of Redis's clock is a real reading, not a missing one.
-			luaStart := start
-			if lua < roundTrip {
-				luaStart = start.Add((roundTrip - lua) / 2)
+			// Clamped to the round-trip so the child can never outrun its
+			// parent when the two clocks disagree.
+			if lua > roundTrip {
+				lua = roundTrip
 			}
+			luaStart := start.Add((roundTrip - lua) / 2)
 			_, luaSpan := store.tracer.Start(ctx, "lua "+algorithm,
 				trace.WithTimestamp(luaStart),
 				trace.WithAttributes(attribute.String("limigo.algorithm", algorithm)),
 			)
 			luaSpan.End(trace.WithTimestamp(luaStart.Add(lua)))
 		}
-		span.End()
+		// The span covers the round-trip, not the reply parsing that follows
+		// it; ending it at the measured instant also keeps it consistent with
+		// the recorder's observation on clocks with coarse wall-time steps.
+		span.End(trace.WithTimestamp(start.Add(roundTrip)))
 	}
 	return cmd, finish
 }
@@ -268,4 +273,71 @@ func parseTokenBucketSync(cmd *redis.Cmd) (remaining float64, lua time.Duration,
 		return 0, 0, fmt.Errorf("unexpected lua_us type %T", res[1])
 	}
 	return remaining, time.Duration(luaUs) * time.Microsecond, nil
+}
+
+// peekMode is the trailing script argument that switches a script from
+// deciding a request to describing what one would see.
+const peekMode = "peek"
+
+// PeekFixedWindow reports what AllowFixedWindow would return for key right
+// now, without incrementing the window.
+func (store *RedisStore) PeekFixedWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error) {
+	cmd, finish := store.exec(ctx, "fixed_window_peek", store.fixedWindowScript, key, limit, window.Milliseconds(), peekMode)
+	res, err := int64Reply(cmd, 4)
+	if err != nil {
+		finish(0, err)
+		return Verdict{}, fmt.Errorf("failed to peek fixed window: %w", err)
+	}
+	finish(time.Duration(res[1])*time.Microsecond, nil)
+	return Verdict{Allowed: res[0] == 1, Remaining: res[2], Reset: time.Duration(res[3]) * time.Millisecond}, nil
+}
+
+// PeekSlidingWindow reports what AllowSlidingWindow would return for key
+// right now, without recording a request or evicting expired ones.
+func (store *RedisStore) PeekSlidingWindow(ctx context.Context, key string, limit int64, window time.Duration) (Verdict, error) {
+	cmd, finish := store.exec(ctx, "sliding_window_peek", store.slidingWindowScript, key, limit, window.Milliseconds(), peekMode)
+	res, err := int64Reply(cmd, 4)
+	if err != nil {
+		finish(0, err)
+		return Verdict{}, fmt.Errorf("failed to peek sliding window: %w", err)
+	}
+	finish(time.Duration(res[1])*time.Microsecond, nil)
+	return Verdict{Allowed: res[0] == 1, Remaining: res[2], Reset: time.Duration(res[3]) * time.Millisecond}, nil
+}
+
+// PeekTokenBucket reports what AllowTokenBucket would return for key right
+// now — refill applied virtually — without consuming a token or writing.
+func (store *RedisStore) PeekTokenBucket(ctx context.Context, key string, capacity float64, rate float64) (Verdict, error) {
+	cmd, finish := store.exec(ctx, "token_bucket_peek", store.tokenBucketScript, key, capacity, rate, peekMode)
+	res, err := int64Reply(cmd, 4)
+	if err != nil {
+		finish(0, err)
+		return Verdict{}, fmt.Errorf("failed to peek token bucket: %w", err)
+	}
+	finish(time.Duration(res[1])*time.Microsecond, nil)
+	return Verdict{Allowed: res[0] == 1, Remaining: res[2], Reset: time.Duration(res[3]) * time.Millisecond}, nil
+}
+
+// PeekLeakyBucket reports what AllowLeakyBucket would return for key right
+// now, without advancing the schedule.
+func (store *RedisStore) PeekLeakyBucket(ctx context.Context, key string, limit int64, window time.Duration, burst int64) (Verdict, error) {
+	if burst < 1 {
+		burst = 1
+	}
+	emissionIntervalMs := float64(window.Milliseconds()) / float64(limit)
+	toleranceMs := emissionIntervalMs * float64(burst-1)
+
+	cmd, finish := store.exec(ctx, "leaky_bucket_peek", store.leakyBucketScript, key, emissionIntervalMs, toleranceMs, peekMode)
+	res, err := int64Reply(cmd, 5)
+	if err != nil {
+		finish(0, err)
+		return Verdict{}, fmt.Errorf("failed to peek leaky bucket: %w", err)
+	}
+	finish(time.Duration(res[2])*time.Microsecond, nil)
+	return Verdict{
+		Allowed:    res[0] == 1,
+		RetryAfter: time.Duration(res[1]) * time.Millisecond,
+		Remaining:  res[3],
+		Reset:      time.Duration(res[4]) * time.Millisecond,
+	}, nil
 }

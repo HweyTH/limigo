@@ -21,7 +21,11 @@
 -- KEYS[1] - rate limit key (hash with fields: tokens, last_refill_ms)
 -- ARGV[1] - bucket capacity (maximum number of tokens)
 -- ARGV[2] - refill rate (tokens per second)
+-- ARGV[3] - optional; 'peek' reports the state a request arriving now would
+--           see — refill applied virtually, nothing consumed, nothing written
+--           (the Admin API's quota inspection).
 local t0 = os.clock()
+local peek = ARGV[3] == 'peek'
 
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
@@ -51,15 +55,18 @@ ttl_ms = math.min(ttl_ms, 86400000)
 
 local allowed = 0
 
-redis.call('HSET', KEYS[1], 'last_refill_ms', now_ms)
-
 if token_count >= 1 then
-    token_count = token_count - 1
     allowed = 1
+    if not peek then
+        token_count = token_count - 1
+    end
 end
-redis.call('HSET', KEYS[1], 'tokens', token_count)
 
-redis.call('PEXPIRE', KEYS[1], ttl_ms)
+if not peek then
+    redis.call('HSET', KEYS[1], 'last_refill_ms', now_ms)
+    redis.call('HSET', KEYS[1], 'tokens', token_count)
+    redis.call('PEXPIRE', KEYS[1], ttl_ms)
+end
 
 local remaining = math.floor(token_count)
 if remaining < 0 then

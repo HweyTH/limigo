@@ -28,8 +28,12 @@
 -- KEYS[1] - rate limit key (string holding the TAT in fractional milliseconds)
 -- ARGV[1] - emission interval in milliseconds (window / limit)
 -- ARGV[2] - tolerance in milliseconds (emission_interval * (burst - 1))
+-- ARGV[3] - optional; 'peek' reports the state a request arriving now would
+--           see without advancing the schedule (the Admin API's quota
+--           inspection).
 
 local t0 = os.clock()
+local peek = ARGV[3] == 'peek'
 
 local emission_interval_ms = tonumber(ARGV[1])
 local tolerance_ms = tonumber(ARGV[2])
@@ -54,6 +58,21 @@ local allow_at = tat - tolerance_ms
 
 if now_ms >= allow_at then
     local new_tat = tat + emission_interval_ms
+    if peek then
+        -- Remaining counts the requests admissible right now including the one
+        -- asked about, which a peek does not admit, so measure from the
+        -- current TAT and do not advance it.
+        local remaining = math.floor((now_ms + tolerance_ms - tat) / emission_interval_ms) + 1
+        if remaining < 0 then
+            remaining = 0
+        end
+        local reset_ms = math.ceil(tat - now_ms)
+        if reset_ms < 0 then
+            reset_ms = 0
+        end
+        local lua_us = math.floor((os.clock() - t0) * 1000000)
+        return {1, 0, lua_us, remaining, reset_ms}
+    end
     local ttl_ms = math.max(math.ceil(new_tat - now_ms), 1)
     redis.call('SET', KEYS[1], tostring(new_tat), 'PX', ttl_ms)
     -- Further requests are admissible while now >= (new_tat + k * interval)
