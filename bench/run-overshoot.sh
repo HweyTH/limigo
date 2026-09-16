@@ -95,7 +95,16 @@ HOST_TAG="$(hostname -s 2>/dev/null || hostname)"
 RESULTS_DIR="$BENCH_DIR/results"
 RAW_DIR="$RESULTS_DIR/raw/$STAMP-overshoot"
 mkdir -p "$RAW_DIR"
-RESULTS_FILE="$RESULTS_DIR/$STAMP-$HOST_TAG-overshoot.md"
+# The store under test is selected outside this script, by COMPOSE_FILE
+# (docker-compose.cluster.yml swaps the single Redis for a three-master
+# cluster). Nothing else here changes for a cluster run, which is the point
+# — but the results file must say which store it measured, in its name and
+# in its recorded command.
+STORE_TAG=""
+if [[ "${COMPOSE_FILE:-}" == *cluster* ]]; then
+	STORE_TAG="-cluster"
+fi
+RESULTS_FILE="$RESULTS_DIR/$STAMP-$HOST_TAG-overshoot$STORE_TAG.md"
 
 log() { echo "[bench-overshoot] $*" >&2; }
 
@@ -310,12 +319,22 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 	echo "## Command"
 	echo
 	echo '```'
+	if [[ -n "${COMPOSE_FILE:-}" ]]; then
+		printf 'COMPOSE_FILE=%s ' "$COMPOSE_FILE"
+	fi
 	if ((${#INVOCATION[@]} > 0)); then
 		echo "bench/run-overshoot.sh ${INVOCATION[*]}"
 	else
 		echo "bench/run-overshoot.sh"
 	fi
 	echo '```'
+	echo
+	if [[ -n "$STORE_TAG" ]]; then
+		echo "**Store: three-master Redis Cluster** (\`docker-compose.cluster.yml\`). The same Lua"
+		echo "scripts, unmodified; keys spread across three slot ranges with no hash tags."
+	else
+		echo "**Store: single Redis** (\`docker-compose.yml\`)."
+	fi
 	echo
 	echo "## Method"
 	echo

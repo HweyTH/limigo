@@ -1,0 +1,83 @@
+# Compose override that swaps the single Redis for a three-master Redis
+# Cluster, so the same Lua scripts can be measured across three shards
+# (README: "Single-key Lua scripts, deliberately no hash tags").
+#
+# Applied on top of the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --wait --scale limigo=3
+#
+# or, for the bench harnesses, which call `docker compose` without -f:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.cluster.yml bench/run-overshoot.sh ...
+#
+# The base file's `redis` service is kept and becomes the first master (so
+# limigo's existing depends_on and healthcheck still bind to something real);
+# two more masters and a one-shot `redis-cluster-init` join them into a
+# cluster with no replicas. Every key Limigo writes hashes to one of the
+# three slot ranges — there are no hash tags to pin them together — so a
+# 10k-key run spreads across all three, and a single-key run lands on one.
+services:
+  redis:
+    command: ["redis-server", "--cluster-enabled", "yes", "--cluster-node-timeout", "5000", "--appendonly", "no", "--save", ""]
+
+  redis-2:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--cluster-enabled", "yes", "--cluster-node-timeout", "5000", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-3:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--cluster-enabled", "yes", "--cluster-node-timeout", "5000", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Forms the cluster once all three masters answer, then exits. `--cluster-yes`
+  # skips the interactive confirmation; `--cluster-replicas 0` makes every
+  # node a master with a third of the 16384 slots. A cluster that already
+  # exists (a restart without `down`) makes the create step fail on "node is
+  # not empty", so it is guarded by a CLUSTER INFO check first.
+  redis-cluster-init:
+    image: redis:7-alpine
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-2:
+        condition: service_healthy
+      redis-3:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if redis-cli -h redis cluster info | grep -q 'cluster_state:ok'; then
+          echo 'cluster already formed'
+          exit 0
+        fi
+        redis-cli --cluster create redis:6379 redis-2:6379 redis-3:6379 --cluster-replicas 0 --cluster-yes
+        for i in $(seq 1 30); do
+          if redis-cli -h redis cluster info | grep -q 'cluster_state:ok'; then
+            echo 'cluster_state:ok'
+            exit 0
+          fi
+          sleep 1
+        done
+        echo 'cluster did not reach cluster_state:ok within 30s' >&2
+        exit 1
+
+  limigo:
+    depends_on:
+      redis-cluster-init:
+        condition: service_completed_successfully
+    environment:
+      # Blank REDIS_ADDR reads as unset, which is what lets the cluster list
+      # be given: the two are mutually exclusive by design (see main.go).
+      REDIS_ADDR: ""
+      LIMIGO_REDIS_CLUSTER_ADDRS: redis:6379,redis-2:6379,redis-3:6379

@@ -321,6 +321,21 @@ a horizontally scalable store into a single-shard bottleneck. Doing nothing is
 the correct design, which is exactly why it is written down: the file that
 rejected hash tags looks identical to the file that never heard of them.
 
+**Running it.** `docker-compose.cluster.yml` swaps the single Redis for a
+three-master cluster with no replicas and points every replica at it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --wait --scale limigo=3
+```
+
+Keys land on all three masters with no configuration beyond the address list,
+and every bench harness runs against it unchanged by selecting the compose
+files through the environment:
+
+```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.cluster.yml bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200
+```
+
 **Consequence.** Multi-key atomic operations are permanently off the table for
 this design. An algorithm that needs two keys touched atomically needs a
 different approach — a single composite key, or a different data model — not a
