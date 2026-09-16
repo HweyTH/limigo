@@ -12,8 +12,15 @@ import (
 // RedisStore is a Redis-backed implementation of FixedWindowStore, SlidingWindowStore,
 // TokenBucketStore, and LeakyBucketStore. Each algorithm's logic runs inside a Lua
 // script executed atomically on the Redis server to prevent race conditions across nodes.
+//
+// The store only ever needs to run scripts, so it holds a redis.Scripter rather
+// than a concrete client: a standalone *redis.Client, a *redis.ClusterClient,
+// and a *redis.Ring all satisfy it. Every script touches exactly KEYS[1], which
+// is what Redis Cluster requires of a script (all keys in one hash slot), so
+// the same Lua runs unmodified against a cluster. See the key-layout note at
+// the top of each script under lua/.
 type RedisStore struct {
-	client                *redis.Client
+	client                redis.Scripter
 	fixedWindowScript     *redis.Script
 	slidingWindowScript   *redis.Script
 	tokenBucketScript     *redis.Script
@@ -23,13 +30,15 @@ type RedisStore struct {
 	recorder              LatencyRecorder
 }
 
-// NewRedisStore returns a RedisStore backed by the given Redis client.
+// NewRedisStore returns a RedisStore that runs its scripts on redisClient, which
+// may be any go-redis client type that implements redis.Scripter (standalone,
+// cluster, or ring).
 // fwScript, swScript, tbScript, and lbScript are the Lua source strings for the fixed
 // window, sliding window, token bucket, and leaky bucket algorithms respectively.
 // fwSyncScript and tbSyncScript are the Lua source strings for the batched delta-sync
 // variants of the fixed window and token bucket algorithms, used by node-local caching.
 // recorder observes the round-trip latency of every script execution, labeled by algorithm.
-func NewRedisStore(redisClient *redis.Client, fwScript string, swScript string, tbScript string, lbScript string, fwSyncScript string, tbSyncScript string, recorder LatencyRecorder) *RedisStore {
+func NewRedisStore(redisClient redis.Scripter, fwScript string, swScript string, tbScript string, lbScript string, fwSyncScript string, tbSyncScript string, recorder LatencyRecorder) *RedisStore {
 	newRedisStore := RedisStore{
 		client:                redisClient,
 		fixedWindowScript:     redis.NewScript(fwScript),

@@ -25,8 +25,13 @@ import (
 )
 
 type options struct {
-	configPath         string
-	redisAddr          string
+	configPath string
+	redisAddr  string
+	// redisClusterAddrs, when non-empty, selects a Redis Cluster client seeded
+	// with these addresses instead of a standalone client at redisAddr. The two
+	// are mutually exclusive: parseOptions rejects a cluster address list given
+	// alongside an explicit redisAddr.
+	redisClusterAddrs  []string
 	httpAddr           string
 	metricsAddr        string
 	shutdownTimeout    time.Duration
@@ -103,9 +108,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("validate config %q: %w", opts.configPath, err)
 	}
 
-	redisClient := goredis.NewClient(&goredis.Options{
-		Addr: opts.redisAddr,
-	})
+	redisClient, redisTarget := newRedisClient(opts)
 	defer func() {
 		if err := redisClient.Close(); err != nil && runErr == nil {
 			runErr = fmt.Errorf("close Redis client: %w", err)
@@ -115,7 +118,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	startupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := redisClient.Ping(startupCtx).Err(); err != nil {
-		return fmt.Errorf("ping Redis at %q: %w", opts.redisAddr, err)
+		return fmt.Errorf("ping Redis at %s: %w", redisTarget, err)
 	}
 
 	reg := prometheus.NewRegistry()
@@ -150,7 +153,7 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		metricsServer = newServer(opts.metricsAddr, metricsMux, defaultServerTimeouts)
 	}
 
-	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis address %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisClient.Options().Addr, opts.httpAddr); err != nil {
+	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisTarget, opts.httpAddr); err != nil {
 		return fmt.Errorf("write startup summary: %w", err)
 	}
 
@@ -265,6 +268,22 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	}
 }
 
+// newRedisClient builds the Redis client opts selects: a ClusterClient seeded
+// with redisClusterAddrs when that list is set, otherwise a standalone Client
+// at redisAddr. target describes the choice for log lines. Both client types
+// satisfy redis.Scripter, which is all store.RedisStore needs — the Lua
+// scripts are single-key and run unmodified on a cluster.
+func newRedisClient(opts options) (client goredis.UniversalClient, target string) {
+	if len(opts.redisClusterAddrs) > 0 {
+		return goredis.NewClusterClient(&goredis.ClusterOptions{
+			Addrs: opts.redisClusterAddrs,
+		}), fmt.Sprintf("cluster %s", strings.Join(opts.redisClusterAddrs, ","))
+	}
+	return goredis.NewClient(&goredis.Options{
+		Addr: opts.redisAddr,
+	}), fmt.Sprintf("address %s", opts.redisAddr)
+}
+
 // parseOptions reads command-line flags and environment fallbacks into runtime options.
 func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (options, error) {
 	opts := options{}
@@ -273,7 +292,13 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	flags.DurationVar(&opts.shutdownTimeout, "shutdown-timeout", envDurationOrDefault(getenv, "LIMIGO_SHUTDOWN_TIMEOUT", 10*time.Second), "max time to wait for in-flight requests to finish on shutdown")
 	flags.DurationVar(&opts.cacheFlushInterval, "cache-flush-interval", envDurationOrDefault(getenv, "LIMIGO_CACHE_FLUSH_INTERVAL", 10*time.Millisecond), "how often to reconcile local_cache rules with the backing store")
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
-	flags.StringVar(&opts.redisAddr, "redis-addr", envOrDefault(getenv, "REDIS_ADDR", "localhost:6379"), "Redis server address")
+	// redisAddr keeps a default so the common single-node case needs no flag;
+	// that means "was it set?" cannot be read off the value alone. redisAddrSet
+	// tracks the environment now and the flag after Parse (via flags.Visit).
+	redisAddrSet := strings.TrimSpace(getenv("REDIS_ADDR")) != ""
+	flags.StringVar(&opts.redisAddr, "redis-addr", envOrDefault(getenv, "REDIS_ADDR", "localhost:6379"), "Redis server address (standalone)")
+	var redisClusterAddrs string
+	flags.StringVar(&redisClusterAddrs, "redis-cluster-addrs", envOrDefault(getenv, "LIMIGO_REDIS_CLUSTER_ADDRS", ""), "comma-separated Redis Cluster seed addresses; mutually exclusive with -redis-addr")
 	flags.StringVar(
 		&opts.httpAddr,
 		"http-addr",
@@ -296,6 +321,15 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	if flags.NArg() > 0 {
 		return opts, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "redis-addr" {
+			redisAddrSet = true
+		}
+	})
+	opts.redisClusterAddrs = splitAddrs(redisClusterAddrs)
+	if len(opts.redisClusterAddrs) > 0 && redisAddrSet {
+		return opts, fmt.Errorf("redis address and redis cluster addresses are mutually exclusive; set one")
+	}
 	if strings.TrimSpace(opts.configPath) == "" {
 		return opts, fmt.Errorf("config path must not be empty")
 	}
@@ -309,6 +343,19 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 		return opts, fmt.Errorf("cache flush interval must be greater than zero")
 	}
 	return opts, nil
+}
+
+// splitAddrs turns a comma-separated address list into its non-blank entries,
+// trimmed, so "a:1, b:2," and "a:1,b:2" parse the same. An empty or
+// all-blank list yields nil.
+func splitAddrs(list string) []string {
+	var addrs []string
+	for addr := range strings.SplitSeq(list, ",") {
+		if addr = strings.TrimSpace(addr); addr != "" {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
 }
 
 // envOrDefault returns a non-blank environment value or the supplied fallback.

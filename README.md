@@ -654,6 +654,7 @@ default. Both are configurable by flag or environment variable:
 |---|---|---|---|
 | `-config` | `LIMIGO_CONFIG` | `config.example.yaml` | path to the rules YAML file |
 | `-redis-addr` | `REDIS_ADDR` | `localhost:6379` | Redis server address |
+| `-redis-cluster-addrs` | `LIMIGO_REDIS_CLUSTER_ADDRS` | — | comma-separated Redis Cluster seed addresses; selects a cluster client instead of `-redis-addr` (the two are mutually exclusive) |
 | `-http-addr` | `LIMIGO_HTTP_ADDR` | `:8080` | API listen address |
 | `-metrics-addr` | `LIMIGO_METRICS_ADDR` | `:9091` | Prometheus `/metrics` listen address; set empty to disable |
 | `-shutdown-timeout` | `LIMIGO_SHUTDOWN_TIMEOUT` | `10s` | max time to drain in-flight requests on `SIGTERM` |

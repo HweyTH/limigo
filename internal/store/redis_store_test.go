@@ -1135,6 +1135,34 @@ func TestSyncTokenBucket(t *testing.T) {
 	})
 }
 
+// TestClusterClientSatisfiesStore pins the reason NewRedisStore takes a
+// redis.Scripter rather than a *redis.Client: a *redis.ClusterClient must be
+// accepted as-is, with no Lua changes. The cluster here is unreachable on
+// purpose — the assertion is that the store is constructible against the
+// cluster type and fails closed through it like it does through a standalone
+// client; measuring a real cluster is bench work, not a unit test.
+func TestClusterClientSatisfiesStore(t *testing.T) {
+	clusterClient := goredis.NewClusterClient(&goredis.ClusterOptions{
+		Addrs:        []string{"localhost:12334668"}, // Intentionally unreachable
+		MaxRedirects: 0,
+	})
+	t.Cleanup(func() { _ = clusterClient.Close() })
+
+	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
+	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
+	store := NewRedisStore(clusterClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	allowed, err := store.AllowFixedWindow(ctx, "test-key-cluster", 10, time.Second)
+	if err == nil {
+		t.Fatal("expected an error from an unreachable cluster, got nil")
+	}
+	if allowed {
+		t.Fatal("expected allowed=false (fail closed) from an unreachable cluster")
+	}
+}
+
 // TestDisconnectedClient verifies Redis-backed limiters fail closed when Redis is unavailable.
 func TestDisconnectedClient(t *testing.T) {
 	badClient := goredis.NewClient(&goredis.Options{
