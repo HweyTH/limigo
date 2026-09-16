@@ -14,13 +14,14 @@
 -- key name of its own. Redis Cluster only runs a script whose keys share one
 -- hash slot, so one declared key makes it cluster-safe as-is. Do not add a
 -- hash tag to the key prefix: keys are independent per rule and caller, and
--- a tag would pin all of them to one slot. Calling TIME and then writing
--- needs Redis 5+ (effects replication). See README "Single-key Lua scripts".
+-- a tag would pin all of them to one slot. Redis 7.4+: the script times
+-- itself with os.clock(), because TIME is frozen for the whole execution.
+-- See README "Single-key Lua scripts".
 --
 -- KEYS[1] - rate limit key (hash with fields: tokens, last_refill_ms)
 -- ARGV[1] - bucket capacity (maximum number of tokens)
 -- ARGV[2] - refill rate (tokens per second)
-local t0 = redis.call('TIME')
+local t0 = os.clock()
 
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
@@ -69,7 +70,6 @@ if reset_ms < 0 then
     reset_ms = 0
 end
 
-local t1 = redis.call('TIME')
-local lua_us = (t1[1] - t0[1]) * 1000000 + (t1[2] - t0[2])
+local lua_us = math.floor((os.clock() - t0) * 1000000)
 
 return {allowed, lua_us, remaining, reset_ms}

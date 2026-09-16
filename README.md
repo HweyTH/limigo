@@ -346,9 +346,18 @@ scripts take the clock from the server with `redis.call('TIME')` rather than
 trusting a caller-supplied timestamp; that is the project's answer to clock
 skew across nodes (see [above](#why-distributed-rate-limiting-is-hard)).
 `TIME` is non-deterministic, and a script that writes after calling it is only
-permitted under *effects replication*, which became the default in **Redis 5**
-(Redis 7 removed the older verbatim mode entirely). The minimum supported Redis
-is therefore 5; the compose stack and the integration suite pin `redis:7`.
+permitted under *effects replication*, the default since Redis 5 and the only
+mode since Redis 7.
+
+The scripts also **time themselves**, returning their own execution time with
+the verdict so the node can record `limigo_lua_execution_seconds` separately
+from the round-trip. That cannot be done with `TIME`: Redis freezes the clock
+for the whole of a script's execution, so two `TIME` calls inside one script
+always agree and the difference is always zero — which is exactly what this
+histogram recorded, unnoticed, until tracing put the figure next to the
+round-trip and the zero became visible. The scripts now use `os.clock()`,
+which Redis exposes to scripts from **7.4**; that is the minimum supported
+Redis, and the compose stack and the integration suite pin `redis:7`.
 
 ### RateLimit header fields
 

@@ -198,3 +198,77 @@ func TestNilTracerProducesNoSpans(t *testing.T) {
 		t.Fatalf("AllowFixedWindow: %v", err)
 	}
 }
+
+// recordingLatencyRecorder keeps every Lua execution observation so a test
+// can assert the scripts report a real, non-zero self-timing.
+type recordingLatencyRecorder struct {
+	lua map[string][]time.Duration
+}
+
+func (r *recordingLatencyRecorder) ObserveRedisLatency(string, time.Duration) {}
+func (r *recordingLatencyRecorder) ObserveLuaExecution(algorithm string, d time.Duration) {
+	r.lua[algorithm] = append(r.lua[algorithm], d)
+}
+
+// TestLuaExecutionTimeIsMeasured guards a regression that went unnoticed
+// for months: redis.call('TIME') is frozen for the whole of a script's
+// execution, so timing a script with it always reports zero, and the
+// limigo_lua_execution_seconds histogram silently recorded nothing but
+// zeros. The scripts now time themselves with os.clock() (Redis 7.4+),
+// which advances; this test fails if any script goes back to a clock that
+// does not.
+func TestLuaExecutionTimeIsMeasured(t *testing.T) {
+	recorder := &recordingLatencyRecorder{lua: map[string][]time.Duration{}}
+	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
+	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
+	store := NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, recorder, nil)
+	ctx := context.Background()
+
+	calls := map[string]func() error{
+		"fixed_window": func() error {
+			_, err := store.AllowFixedWindow(ctx, redisTestKey(t, "fw"), 10, time.Second)
+			return err
+		},
+		"sliding_window": func() error {
+			_, err := store.AllowSlidingWindow(ctx, redisTestKey(t, "sw"), 10, time.Second)
+			return err
+		},
+		"token_bucket": func() error {
+			_, err := store.AllowTokenBucket(ctx, redisTestKey(t, "tb"), 10, 1)
+			return err
+		},
+		"leaky_bucket": func() error {
+			_, err := store.AllowLeakyBucket(ctx, redisTestKey(t, "lb"), 10, time.Second, 1)
+			return err
+		},
+		"fixed_window_sync": func() error {
+			_, err := store.SyncFixedWindow(ctx, redisTestKey(t, "fws"), 1, time.Second)
+			return err
+		},
+		"token_bucket_sync": func() error {
+			_, err := store.SyncTokenBucket(ctx, redisTestKey(t, "tbs"), 1, 10, 1)
+			return err
+		},
+	}
+	for algorithm, call := range calls {
+		t.Run(algorithm, func(t *testing.T) {
+			// A handful of calls: os.clock() has microsecond resolution and a
+			// script can finish inside one tick, so the claim is "measured at
+			// least once", not "never zero".
+			for range 20 {
+				if err := call(); err != nil {
+					t.Fatalf("%s: %v", algorithm, err)
+				}
+			}
+			var max time.Duration
+			for _, d := range recorder.lua[algorithm] {
+				if d > max {
+					max = d
+				}
+			}
+			if max <= 0 {
+				t.Fatalf("%s reported a Lua execution time of zero on every call; the script's clock is not advancing", algorithm)
+			}
+		})
+	}
+}
