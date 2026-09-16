@@ -215,7 +215,7 @@ func TestNewCheckHandlerRecordsRequestOutcome(t *testing.T) {
 			request.Header.Set("X-Plan", "free")
 			responseRecorder := httptest.NewRecorder()
 
-			NewCheckHandler(checker, requestRecorder, testCheckTimeout).ServeHTTP(responseRecorder, request)
+			NewCheckHandler(checker, requestRecorder, testCheckTimeout, nil).ServeHTTP(responseRecorder, request)
 
 			if len(requestRecorder.calls) != 1 {
 				t.Fatalf("RecordRequest calls = %d, want 1", len(requestRecorder.calls))
@@ -234,7 +234,7 @@ func TestNewCheckHandlerRecordsRequestOutcome(t *testing.T) {
 		request.Header.Set("X-Plan", "free")
 		responseRecorder := httptest.NewRecorder()
 
-		NewCheckHandler(checker, requestRecorder, testCheckTimeout).ServeHTTP(responseRecorder, request)
+		NewCheckHandler(checker, requestRecorder, testCheckTimeout, nil).ServeHTTP(responseRecorder, request)
 
 		if len(requestRecorder.calls) != 0 {
 			t.Fatalf("RecordRequest calls = %d, want 0 for a malformed request", len(requestRecorder.calls))
@@ -278,7 +278,7 @@ func TestNewCheckHandlerBoundsStoreCallWithDeadline(t *testing.T) {
 			responseRecorder := httptest.NewRecorder()
 
 			start := time.Now()
-			NewCheckHandler(blockingChecker{}, requestRecorder, tt.timeout).ServeHTTP(responseRecorder, request)
+			NewCheckHandler(blockingChecker{}, requestRecorder, tt.timeout, nil).ServeHTTP(responseRecorder, request)
 			elapsed := time.Since(start)
 
 			// Well inside the 10s WriteTimeout the deadline exists to beat, and
@@ -307,7 +307,7 @@ func serveCheckRequest(t *testing.T, checker *fakeChecker, method string, body s
 	request.Header.Set("X-Plan", plan)
 	recorder := httptest.NewRecorder()
 
-	NewCheckHandler(checker, &fakeRequestRecorder{}, testCheckTimeout).ServeHTTP(recorder, request)
+	NewCheckHandler(checker, &fakeRequestRecorder{}, testCheckTimeout, nil).ServeHTTP(recorder, request)
 	return recorder
 }
 

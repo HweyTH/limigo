@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/hweyth/limigo/internal/rules"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Checker is the request-time rule engine used by the HTTP API.
@@ -52,7 +55,13 @@ type checkResponse struct {
 // written and the client sees a reset instead. The deadline must be shorter
 // than WriteTimeout, and engine must honour context cancellation for it to
 // bite (RedisStore does: main enables go-redis's context timeouts).
-func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time.Duration) http.Handler {
+//
+// tracer, when non-nil, opens a span around each engine call carrying the
+// matched rule and the outcome; the store nests its own Redis and Lua spans
+// beneath it, so a cached decision shows as a check span with nothing under
+// it and an uncached one shows the round-trip inside. nil disables it at no
+// cost to the hot path.
+func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time.Duration, tracer trace.Tracer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -74,7 +83,23 @@ func NewCheckHandler(engine Checker, recorder RequestRecorder, checkTimeout time
 
 		ctx, cancel := context.WithTimeout(r.Context(), checkTimeout)
 		defer cancel()
+		var span trace.Span
+		if tracer != nil {
+			ctx, span = tracer.Start(ctx, "limigo.check")
+		}
 		decision, err := engine.Check(ctx, key, r.Header.Get)
+		if span != nil {
+			span.SetAttributes(
+				attribute.String("limigo.rule", decision.RuleName),
+				attribute.Bool("limigo.matched", decision.Matched),
+				attribute.Bool("limigo.allowed", decision.Allowed),
+			)
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
+		}
 		switch {
 		case err != nil:
 			recorder.RecordRequest(decision.RuleName, "error")

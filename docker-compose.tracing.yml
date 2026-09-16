@@ -1,0 +1,26 @@
+# Compose override that adds Jaeger and turns Limigo's tracing on.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tracing.yml up -d --wait
+#
+# Tracing is off in the base file on purpose: every number under
+# bench/results/ was measured without it, and the bench harnesses run the
+# base file unchanged, so the published figures and the benchmark stack stay
+# the same thing. This override is the switch. Jaeger's UI is at
+# http://localhost:16686; Limigo exports to it over OTLP/HTTP on 4318.
+services:
+  jaeger:
+    # Jaeger v2 accepts OTLP natively; no collector in between.
+    image: jaegertracing/jaeger:2.21.0
+    restart: unless-stopped
+    ports:
+      - "16686:16686"
+
+  limigo:
+    depends_on:
+      jaeger:
+        condition: service_started
+    environment:
+      LIMIGO_TRACING_ENDPOINT: http://jaeger:4318
+      # Every trace is recorded. This is a dev stack; lower it in front of
+      # real traffic.
+      LIMIGO_TRACING_SAMPLE_RATIO: "1"

@@ -477,9 +477,54 @@ only, runnable `Example` functions, and the compatibility promise stated in
 the package doc. The batching types stay internal until their contract has
 settled.
 
+## Tracing
+
+Tracing is what makes the local-cache trade-off *visible*. The benchmark
+tables below quantify it; one pair of traces shows it:
+
+![Two Jaeger traces of POST /v1/check. Uncached rule: 272 µs, with limigo.check, a redis.script token_bucket client span and a nested lua token_bucket span of 22 µs. Cached rule: 68 µs, limigo.check 3 µs, no Redis span at all.](assets/tracing/cached-vs-uncached.png)
+
+Same endpoint, same key, one second apart, on the same node. The uncached
+rule spends its request inside one Redis round-trip — and the trace separates
+the round-trip (185 µs) from the script that ran inside it (22 µs), the same
+distinction the `limigo_redis_latency_seconds` and
+`limigo_lua_execution_seconds` histograms make. The cached rule never leaves
+the process: the check is 3 µs and there is nothing beneath it. That absence
+is the whole feature.
+
+The critical path is instrumented end to end: the inbound request (an
+`otelhttp` server span with W3C `traceparent` propagation, so a caller's trace
+continues here), the rule match and decision (`limigo.check`, tagged with the
+rule, `matched` and `allowed`), the Redis round-trip (`redis.script
+<algorithm>`, a client span) and, nested inside it, the script's own
+execution (`lua <algorithm>`). The Lua span's duration is exact — the script
+times itself with `os.clock()` and returns the figure with its verdict — but
+its position inside the round-trip is an estimate, centred, because the
+script knows how long it ran and not when. What the trace shows truthfully is
+the proportion.
+
+**Off by default, and the reason is the benchmarks.** Every number in
+[`bench/results/`](bench/results/) and every table below was measured with
+tracing off. Turning it on globally would silently change the thing being
+measured, so the base compose file and the bench harnesses never enable it;
+`docker-compose.tracing.yml` is the switch, adding Jaeger and pointing every
+replica at it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tracing.yml up -d --wait
+open http://localhost:16686   # Jaeger UI
+```
+
+Outside compose, `-tracing-endpoint http://<collector>:4318` (OTLP/HTTP)
+turns it on and `-tracing-sample-ratio` (default `1`, every trace) sets the
+head-sampling fraction; a trace that arrives with a sampled parent is always
+recorded. With the flag unset no span code runs on the request path — not
+even a no-op span — so "off" is the exact code the benchmarks ran.
+
 ## Benchmarks
 
-Every number below was measured on this project's own hardware and is
+Every number below was measured on this project's own hardware, **with
+tracing off** (see [Tracing](#tracing)), and is
 reported as a cost relative to a measured ceiling, never as a bare absolute: a
 limiter's throughput alone cannot tell you whether the limiter is slow or the
 environment is saturated. Methodology sits beside each table; raw per-run
@@ -831,6 +876,7 @@ Once the containers are healthy:
 | Limigo API | http://localhost:8080/v1/check | `POST` requests here, routed through Traefik to whichever replica picks it up |
 | Prometheus | http://localhost:9090 | discovers and scrapes every Limigo replica every 5s |
 | Grafana | http://localhost:3000 | login `admin` / `admin`; the "Limigo" dashboard is pre-loaded |
+| Jaeger | http://localhost:16686 | only with `-f docker-compose.tracing.yml` (see [Tracing](#tracing)) |
 
 Limigo binds no fixed host ports. Traefik is the only entry point, so the API
 stays at one address however many replicas run. Scale with:
@@ -913,6 +959,8 @@ default. Both are configurable by flag or environment variable:
 | `-metrics-addr` | `LIMIGO_METRICS_ADDR` | `:9091` | Prometheus `/metrics` listen address; set empty to disable |
 | `-shutdown-timeout` | `LIMIGO_SHUTDOWN_TIMEOUT` | `10s` | max time to drain in-flight requests on `SIGTERM` |
 | `-drain-delay` | `LIMIGO_DRAIN_DELAY` | `6s` | on `SIGTERM`, how long to keep serving after `/readyz` starts returning 503, so the load balancer's next health check routes new requests elsewhere; cover one check interval |
+| `-tracing-endpoint` | `LIMIGO_TRACING_ENDPOINT` | — | OTLP/HTTP collector URL, e.g. `http://jaeger:4318`; empty (the default) disables tracing entirely |
+| `-tracing-sample-ratio` | `LIMIGO_TRACING_SAMPLE_RATIO` | `1` | fraction of new traces recorded when tracing is on, `0`–`1` |
 | `-cache-flush-interval` | `LIMIGO_CACHE_FLUSH_INTERVAL` | `10ms` | how often `local_cache: true` rules sync to Redis |
 
 Write your own rules by copying `config.example.yaml`; the

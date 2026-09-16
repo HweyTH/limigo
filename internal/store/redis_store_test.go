@@ -34,7 +34,7 @@ func (fakeLatencyRecorder) ObserveLuaExecution(algorithm string, d time.Duration
 func newTestRedisStore() *RedisStore {
 	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
+	return NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{}, nil)
 }
 
 // redisTestKey returns a unique key per test case to avoid cross-test state leaks.
@@ -1150,7 +1150,7 @@ func TestClusterClientSatisfiesStore(t *testing.T) {
 
 	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	store := NewRedisStore(clusterClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
+	store := NewRedisStore(clusterClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{}, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1171,7 +1171,7 @@ func TestDisconnectedClient(t *testing.T) {
 
 	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
 	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
-	store := NewRedisStore(badClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{})
+	store := NewRedisStore(badClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{}, nil)
 	ctx := context.Background()
 
 	t.Run("Fixed Window Fail Closed", func(t *testing.T) {

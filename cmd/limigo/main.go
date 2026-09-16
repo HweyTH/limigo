@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,8 +21,12 @@ import (
 	"github.com/hweyth/limigo/internal/metrics"
 	"github.com/hweyth/limigo/internal/rules"
 	"github.com/hweyth/limigo/internal/store"
+	"github.com/hweyth/limigo/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 	goredis "github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type options struct {
@@ -40,6 +45,12 @@ type options struct {
 	// before it stops accepting connections: the window in which the proxy's
 	// next health check observes the 503 and routes new requests elsewhere.
 	drainDelay time.Duration
+	// tracingEndpoint is the OTLP/HTTP collector URL. Empty — the default —
+	// means tracing is off and no span code runs on the request path.
+	tracingEndpoint string
+	// tracingSampleRatio is the fraction of new traces recorded when tracing
+	// is on; traces with a sampled parent are always recorded.
+	tracingSampleRatio float64
 }
 
 // serverTimeouts bounds how long an http.Server waits on a client at each
@@ -149,11 +160,30 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		return fmt.Errorf("init metrics: %w", err)
 	}
 
+	// Tracing is off unless an endpoint is given. Off means tracer is nil and
+	// the request path runs exactly the code the published benchmarks ran —
+	// not a no-op span per request, which would still be a change.
+	var tracerProvider trace.TracerProvider
+	var tracer trace.Tracer
+	if opts.tracingEndpoint != "" {
+		provider, shutdownTracing, err := tracing.Setup(context.Background(), opts.tracingEndpoint, opts.tracingSampleRatio)
+		if err != nil {
+			return fmt.Errorf("set up tracing: %w", err)
+		}
+		defer func() {
+			if err := shutdownTracing(context.Background()); err != nil && runErr == nil {
+				runErr = fmt.Errorf("shut down tracing: %w", err)
+			}
+		}()
+		tracerProvider = provider
+		tracer = provider.Tracer(tracing.ServiceName)
+	}
+
 	fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, err := store.LoadEmbeddedScripts()
 	if err != nil {
 		return fmt.Errorf("load Lua scripts: %w", err)
 	}
-	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, m)
+	redisStore := store.NewRedisStore(redisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, m, tracer)
 
 	engine, err := rules.Compile(cfg, redisStore, m)
 	if err != nil {
@@ -164,7 +194,17 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 	readiness := api.NewReadiness()
 
 	mux := http.NewServeMux()
-	mux.Handle("/v1/check", api.NewCheckHandler(holder, m, defaultCheckTimeout))
+	checkHandler := api.NewCheckHandler(holder, m, defaultCheckTimeout, tracer)
+	if tracerProvider != nil {
+		// Only /v1/check is wrapped. /healthz is the control endpoint every
+		// benchmark ceiling is measured against and must stay untouched, and
+		// a health check has nothing to trace.
+		checkHandler = otelhttp.NewHandler(checkHandler, "POST /v1/check",
+			otelhttp.WithTracerProvider(tracerProvider),
+			otelhttp.WithPropagators(propagation.TraceContext{}),
+		)
+	}
+	mux.Handle("/v1/check", checkHandler)
 	mux.Handle("/healthz", api.NewHealthzHandler())
 	mux.Handle("/readyz", readiness.Handler())
 
@@ -177,7 +217,11 @@ func run(args []string, getenv func(string) string, stdout io.Writer, stderr io.
 		metricsServer = newServer(opts.metricsAddr, metricsMux, defaultServerTimeouts)
 	}
 
-	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis %s; HTTP address %s\n", len(cfg.Rules), opts.configPath, redisTarget, opts.httpAddr); err != nil {
+	tracingSummary := "tracing off"
+	if opts.tracingEndpoint != "" {
+		tracingSummary = fmt.Sprintf("tracing to %s (sample ratio %v)", opts.tracingEndpoint, opts.tracingSampleRatio)
+	}
+	if _, err := fmt.Fprintf(stdout, "loaded %d rules from %s; redis %s; HTTP address %s; %s\n", len(cfg.Rules), opts.configPath, redisTarget, opts.httpAddr, tracingSummary); err != nil {
 		return fmt.Errorf("write startup summary: %w", err)
 	}
 
@@ -338,6 +382,8 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	// Default covers one Traefik health-check interval (5s in
 	// docker-compose.yml) with a second to spare for the check itself.
 	flags.DurationVar(&opts.drainDelay, "drain-delay", envDurationOrDefault(getenv, "LIMIGO_DRAIN_DELAY", 6*time.Second), "how long to keep serving after failing /readyz before closing the listener; cover one load-balancer health-check interval")
+	flags.StringVar(&opts.tracingEndpoint, "tracing-endpoint", envOrDefault(getenv, "LIMIGO_TRACING_ENDPOINT", ""), "OTLP/HTTP collector URL for traces, e.g. http://jaeger:4318; empty disables tracing")
+	flags.Float64Var(&opts.tracingSampleRatio, "tracing-sample-ratio", envFloatOrDefault(getenv, "LIMIGO_TRACING_SAMPLE_RATIO", 1.0), "fraction of new traces to record when tracing is on, 0 to 1")
 	flags.StringVar(&opts.configPath, "config", envOrDefault(getenv, "LIMIGO_CONFIG", "config.example.yaml"), "path to Limigo YAML config file")
 	// redisAddr keeps a default so the common single-node case needs no flag;
 	// that means "was it set?" cannot be read off the value alone. redisAddrSet
@@ -392,6 +438,9 @@ func parseOptions(args []string, getenv func(string) string, stderr io.Writer) (
 	if opts.drainDelay < 0 {
 		return opts, fmt.Errorf("drain delay must not be negative")
 	}
+	if opts.tracingSampleRatio < 0 || opts.tracingSampleRatio > 1 {
+		return opts, fmt.Errorf("tracing sample ratio must be between 0 and 1")
+	}
 	return opts, nil
 }
 
@@ -414,6 +463,19 @@ func envOrDefault(getenv func(string) string, key string, fallback string) strin
 		return value
 	}
 	return fallback
+}
+
+// envFloatOrDefault returns a parseable environment value or the supplied fallback.
+func envFloatOrDefault(getenv func(string) string, key string, fallback float64) float64 {
+	value := strings.TrimSpace(getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func envDurationOrDefault(getenv func(string) string, key string, fallback time.Duration) time.Duration {

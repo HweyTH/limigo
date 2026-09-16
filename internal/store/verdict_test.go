@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TestVerdictQuota pins the quota fields every script returns beside the
@@ -139,4 +143,58 @@ func TestVerdictQuota(t *testing.T) {
 			t.Fatalf("second: Reset = %s, RetryAfter = %s; with burst 1 they must agree", second.Reset, second.RetryAfter)
 		}
 	})
+}
+
+// TestTracingNestsLuaInsideRedisSpan pins the trace shape a store call
+// produces when a tracer is supplied: one client span for the round-trip,
+// with the script's own execution time nested inside it as a child whose
+// duration is exactly what the script reported. A trace that showed only the
+// round-trip would throw away the distinction the metrics already make.
+func TestTracingNestsLuaInsideRedisSpan(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	fwScript, swScript, tbScript, lbScript := scripts["fw"], scripts["sw"], scripts["tb"], scripts["lb"]
+	fwSyncScript, tbSyncScript := scripts["fw_sync"], scripts["tb_sync"]
+	traced := NewRedisStore(globalRedisClient, fwScript, swScript, tbScript, lbScript, fwSyncScript, tbSyncScript, fakeLatencyRecorder{}, provider.Tracer("test"))
+
+	if _, err := traced.AllowFixedWindow(context.Background(), redisTestKey(t, "traced"), 5, time.Second); err != nil {
+		t.Fatalf("AllowFixedWindow: %v", err)
+	}
+
+	spans := exporter.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("got %d spans, want 2 (redis round-trip and nested lua)", len(spans))
+	}
+	// Spans export in end order: the Lua child is ended first.
+	lua, redisSpan := spans[0], spans[1]
+	if redisSpan.Name != "redis.script fixed_window" || redisSpan.SpanKind != trace.SpanKindClient {
+		t.Fatalf("round-trip span = %q (%s), want \"redis.script fixed_window\" of kind client", redisSpan.Name, redisSpan.SpanKind)
+	}
+	if lua.Name != "lua fixed_window" {
+		t.Fatalf("nested span = %q, want \"lua fixed_window\"", lua.Name)
+	}
+	if lua.Parent.SpanID() != redisSpan.SpanContext.SpanID() {
+		t.Fatal("lua span is not a child of the redis span")
+	}
+	if lua.StartTime.Before(redisSpan.StartTime) || lua.EndTime.After(redisSpan.EndTime) {
+		t.Fatalf("lua span [%s, %s] is not inside the redis span [%s, %s]", lua.StartTime, lua.EndTime, redisSpan.StartTime, redisSpan.EndTime)
+	}
+	if lua.EndTime.Sub(lua.StartTime) > redisSpan.EndTime.Sub(redisSpan.StartTime) {
+		t.Fatal("lua span is longer than the round-trip that contains it")
+	}
+}
+
+// TestNilTracerProducesNoSpans is the "off" guarantee: a store built with a
+// nil tracer must not touch tracing at all, so the request path matches what
+// the published benchmarks measured.
+func TestNilTracerProducesNoSpans(t *testing.T) {
+	store := newTestRedisStore()
+	if store.tracer != nil {
+		t.Fatal("test store should have no tracer")
+	}
+	if _, err := store.AllowFixedWindow(context.Background(), redisTestKey(t, "untraced"), 5, time.Second); err != nil {
+		t.Fatalf("AllowFixedWindow: %v", err)
+	}
 }

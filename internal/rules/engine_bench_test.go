@@ -95,7 +95,7 @@ func newBenchEngine(b *testing.B) *Engine {
 		b.Fatalf("init metrics: %v", err)
 	}
 
-	redisStore := store.NewRedisStore(benchRedisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, m)
+	redisStore := store.NewRedisStore(benchRedisClient, fixedWindowScript, slidingWindowScript, tokenBucketScript, leakyBucketScript, fixedWindowSyncScript, tokenBucketSyncScript, m, nil)
 
 	engine, err := Compile(cfg, redisStore, m)
 	if err != nil {
