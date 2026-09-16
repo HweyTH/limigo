@@ -1,0 +1,59 @@
+name: Release
+
+# Publishes the container image to GitHub Container Registry on every
+# version tag, so the README's fastest path is `docker run ghcr.io/hweyth/limigo`
+# with no checkout. The Dockerfile already produces a distroless image with a
+# companion healthcheck binary; this workflow only adds the publishing.
+on:
+  push:
+    tags: ["v*"]
+
+# Read-only by default. The one job that pushes gets packages: write at the
+# job, not the workflow, so nothing else added here later inherits it.
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: build & push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # arm64 is not a nicety here: every committed result under bench/results/
+      # was produced on an Apple M2, and reproducing them on that class of
+      # hardware needs a native image rather than an emulated one.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The built-in token is enough for ghcr.io; there is no secret to manage.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Image name is lower-cased from the repository slug; ghcr.io rejects
+      # upper case. Tags: the git tag without its v (v0.1.0 -> 0.1.0), the
+      # tag verbatim, and latest.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

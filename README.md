@@ -749,7 +749,25 @@ blobs).
 
 ## Installation
 
-### Option A: Docker Compose (fastest way to see it working)
+### Option A: the published image, no clone
+
+Every tagged release is published to GitHub Container Registry for
+`linux/amd64` and `linux/arm64` (native on Apple Silicon, the hardware every
+benchmark above ran on). Limigo needs a Redis to talk to, so this is three
+commands rather than one:
+
+```bash
+docker network create limigo
+docker run -d --name redis --network limigo redis:7-alpine
+docker run --rm --network limigo -p 8080:8080 -p 9091:9091 \
+  -e REDIS_ADDR=redis:6379 ghcr.io/hweyth/limigo:0.1.0
+```
+
+The image ships with `config.example.yaml` baked in; mount your own rules
+over it with `-v $PWD/rules.yaml:/app/config.example.yaml:ro`. Then try a
+request as shown under Option B below.
+
+### Option B: Docker Compose (fastest way to see the whole stack)
 
 One command brings up Limigo, Redis, Prometheus and Grafana, wired together
 and pre-provisioned. Requires only
@@ -821,7 +839,7 @@ Content-Type: application/json
 Tear it down with `docker compose down` (add `-v` to also drop Redis's data
 volume).
 
-### Option B: Run locally with Go
+### Option C: Run locally with Go
 
 Requires Go 1.25+ and a running Redis.
 
