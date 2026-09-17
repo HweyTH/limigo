@@ -1,12 +1,12 @@
 # Load generator image used for in-network runs. Built locally
 # rather than pulled from a registry so the harness has no external image
 # dependency beyond the Go toolchain it already requires.
-FROM golang:1.25-alpine AS build
+FROM golang:1.27-alpine AS build
 # Pinned so a rerun next month builds the same generator, not whatever is
 # newest on the day (CONTEXT.md: no published number without a reproducible
 # command — that command must resolve to a fixed build).
 RUN go install github.com/tsenart/vegeta/v12@v12.13.0
 
-FROM alpine:3.20
+FROM alpine:3.24
 COPY --from=build /go/bin/vegeta /usr/local/bin/vegeta
 ENTRYPOINT ["vegeta"]
