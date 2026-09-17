@@ -77,18 +77,21 @@ jobs:
   proto:
     name: proto lint & generated code
     runs-on: ubuntu-latest
-    # buf's own go.mod asks for a newer Go than this project's line; setup-go
-    # pins GOTOOLCHAIN=local, so let `go run` fetch the toolchain buf needs.
-    # The project itself is still built and tested on GO_VERSION above.
-    env:
-      GOTOOLCHAIN: auto
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
+      # buf's own go.mod asks for a newer Go than this project's line, and
+      # setup-go exports GOTOOLCHAIN=local, which outranks a job-level env.
+      # Override on the two buf steps only so `go run` can fetch the
+      # toolchain buf needs; the project itself still builds on GO_VERSION.
       - run: go run github.com/bufbuild/buf/cmd/buf@v1.73.0 lint
+        env:
+          GOTOOLCHAIN: auto
       - run: go run github.com/bufbuild/buf/cmd/buf@v1.73.0 generate
+        env:
+          GOTOOLCHAIN: auto
       - name: generated code is current
         run: |
           if ! git diff --exit-code -- internal/gen; then
