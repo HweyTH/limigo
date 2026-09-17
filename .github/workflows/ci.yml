@@ -77,6 +77,11 @@ jobs:
   proto:
     name: proto lint & generated code
     runs-on: ubuntu-latest
+    # buf's own go.mod asks for a newer Go than this project's line; setup-go
+    # pins GOTOOLCHAIN=local, so let `go run` fetch the toolchain buf needs.
+    # The project itself is still built and tested on GO_VERSION above.
+    env:
+      GOTOOLCHAIN: auto
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
