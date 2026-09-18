@@ -345,6 +345,9 @@ files through the environment:
 COMPOSE_FILE=docker-compose.yml:docker-compose.cluster.yml bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200
 ```
 
+That command has been run; the numbers are in [§2](#2-overshoot--consistency--the-headline-result)
+under the single-node ones.
+
 **Consequence.** Multi-key atomic operations are permanently off the table for
 this design. An algorithm that needs two keys touched atomically needs a
 different approach — a single composite key, or a different data model — not a
@@ -700,6 +703,26 @@ values from 1ms to 1000ms, are at
 [`bench/results/2026-08-23-220502-Thais-MacBook-Air-3-overshoot.md`](bench/results/2026-08-23-220502-Thais-MacBook-Air-3-overshoot.md)
 and
 [`bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md`](bench/results/2026-08-23-223052-Thais-MacBook-Air-3-flush-sweep.md).
+
+**Against a three-master Redis Cluster.** The same command, with
+`docker-compose.cluster.yml` swapping the single Redis for three masters and
+the Lua scripts untouched:
+
+| nodes | arm | admitted | expected ceiling | overshoot |
+|---|---|---|---|---|
+| 1 | `local_cache: false` | 1,398 | 1,400 | -0.14% |
+| 2 | `local_cache: false` | 1,399 | 1,400 | -0.07% |
+| 3 | `local_cache: false` | 1,398 | 1,400 | -0.14% |
+| 1 | `local_cache: true` | 1,396 | 1,400 | -0.29% |
+| 2 | `local_cache: true` | 1,399 | 1,400 | -0.07% |
+| 3 | `local_cache: true` | 1,400 | 1,400 | 0.00% |
+
+Indistinguishable from the single-Redis run to within the two or three
+requests the pacer itself varies by, which is the expected shape: a single-key
+test lands on one slot and therefore one master, so sharding changes where the
+key lives and nothing about how it is counted. The point of the row is that
+the scripts ran unmodified against a cluster and the result held. Full run at
+[`bench/results/2026-09-18-182924-Thais-MacBook-Air-3-overshoot-cluster.md`](bench/results/2026-09-18-182924-Thais-MacBook-Air-3-overshoot-cluster.md).
 
 ### 3. Node axis — throughput at 1, 2, 3 nodes, generator-bound
 
