@@ -28,7 +28,7 @@
 # Per CONTEXT.md this is a measurement, not a claim: whatever the timeline
 # shows is published as-is.
 #
-# Usage: bench/run-rolling-restart.sh [--rate 100] [--duration 90] [--first-restart-at 15] [--scale 3] [--keep-stack]
+# Usage: bench/run-rolling-restart.sh [--rate 100] [--duration 130] [--first-restart-at 15] [--scale 3] [--keep-stack]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +36,7 @@ BENCH_DIR="$ROOT/bench"
 cd "$ROOT"
 
 RATE="100"
-DURATION="90"
+DURATION="130"
 FIRST_RESTART_AT="15"
 SCALE="3"
 KEEP_STACK="0"
@@ -179,14 +179,20 @@ bash "$BENCH_DIR/gen-targets.sh" "$PROXY_URL" "burst" 1 "$TARGETS"
 bring_up "$SCALE"
 
 log "starting generator: ${RATE}/1s for ${DURATION}s, single key"
-CONTAINER="$(docker run -d \
+# The targets file is copied into the container rather than read through the
+# bind mount: on Docker Desktop, reading a bind-mounted file while sibling
+# containers are being restarted has failed with EDEADLK ("resource deadlock
+# avoided") and taken the whole run with it. Output still goes to the mount.
+CONTAINER="$(docker create \
 	--network "$NETWORK" \
 	--cpuset-cpus="$GEN_CPUSET" \
 	-v "$RAW_DIR:/raw" \
 	limigo-bench-vegeta \
-	attack -targets="/raw/$(basename "$TARGETS")" -format=json \
+	attack -targets=/targets.jsonl -format=json \
 	-rate="${RATE}/1s" -duration="${DURATION}s" \
 	-output="/raw/rolling.bin")"
+docker cp "$TARGETS" "$CONTAINER:/targets.jsonl"
+docker start "$CONTAINER" >/dev/null
 T0_HOST="$(now_epoch)"
 
 sleep "$FIRST_RESTART_AT"
@@ -208,24 +214,26 @@ done
 
 log "waiting for the generator to finish"
 EXIT_CODE="$(docker wait "$CONTAINER")"
-docker rm "$CONTAINER" >/dev/null
 if [[ "$EXIT_CODE" != "0" ]]; then
-	echo "FATAL: generator exited $EXIT_CODE — check $RAW_DIR/rolling.bin" >&2
+	echo "FATAL: generator exited $EXIT_CODE; its output follows" >&2
+	docker logs "$CONTAINER" >&2 || true
+	docker rm "$CONTAINER" >/dev/null
 	exit 1
 fi
+docker rm "$CONTAINER" >/dev/null
 
 # Decode and bucket per second. Columns:
 # second|200|429|5xx|other, where 5xx is any 500–599 (a replica's 503, or
 # Traefik's 502/504 when it had nowhere to send the request) and other is
 # everything else including code 0 (no HTTP response).
 docker run --rm -v "$RAW_DIR:/raw" limigo-bench-vegeta encode -to=json "/raw/rolling.bin" >"$RAW_DIR/rolling.jsonl.out"
-FIRST_EPOCH="$(jq -r '.timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601' "$RAW_DIR/rolling.jsonl.out" | sort -n | head -1)"
+FIRST_EPOCH="$(jq -rs 'map(.timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601) | min' "$RAW_DIR/rolling.jsonl.out")"
 jq -r --argjson t0 "$FIRST_EPOCH" '
 	((.timestamp | sub("\\.[0-9]+"; "") | fromdateiso8601) - $t0) as $s
 	| "\($s) \(.code)"' "$RAW_DIR/rolling.jsonl.out" |
 	awk -v duration="$DURATION" '
-		{ if ($2 == 200) a[$1]++; else if ($2 == 429) d[$1]++; else if ($2 >= 500 && $2 <= 599) e[$1]++; else o[$1]++ }
-		END { for (s = 0; s < duration; s++) printf "%d|%d|%d|%d|%d\n", s, a[s] + 0, d[s] + 0, e[s] + 0, o[s] + 0 }' \
+		{ if ($2 == 200) a[$1]++; else if ($2 == 429) d[$1]++; else if ($2 >= 500 && $2 <= 599) e[$1]++; else o[$1]++; if ($1 > last) last = $1 }
+		END { if (last < duration - 1) last = duration - 1; for (s = 0; s <= last; s++) printf "%d|%d|%d|%d|%d\n", s, a[s] + 0, d[s] + 0, e[s] + 0, o[s] + 0 }' \
 		>"$RAW_DIR/rolling.seconds"
 
 TOTALS="$(awk -F'|' '{ a += $2; d += $3; e += $4; o += $5 } END { printf "%d|%d|%d|%d", a, d, e, o }' "$RAW_DIR/rolling.seconds")"

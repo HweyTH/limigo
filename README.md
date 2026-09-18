@@ -108,7 +108,11 @@ serving for `-drain-delay` so Traefik's next health check routes new requests
 to its peers, and only then closes its listener and drains what is in flight.
 Readiness deliberately does not probe Redis: a store outage already shows as
 fail-closed 503s per rule, and failing readiness on it too would pull every
-node out of the pool at once with less to show for it.
+node out of the pool at once with less to show for it. Measured:
+`bench/run-rolling-restart.sh` restarts three replicas one at a time under a
+steady 100 req/s, and on the M2 **0 of 13,000 requests were dropped** — no
+5xx, no connectionless failures — across the three restarts
+([results](bench/results/2026-09-18-141311-Thais-MacBook-Air-3-rolling-restart.md)).
 
 A control plane sits beside the data plane on every node — the
 [Admin API](#admin-api), gRPC on `:9092` and REST on `:9093` — to list the
@@ -1005,7 +1009,7 @@ bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: ov
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
 bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat
 bench/run-failure-mode.sh # §7: Redis-outage failure mode, flip and recovery
-bench/run-rolling-restart.sh  # readiness: restart replicas one at a time under load, count dropped requests
+bench/run-rolling-restart.sh  # readiness: restart replicas one at a time under load, count dropped requests (result linked above)
 ```
 
 `bench/run-microbench.sh` needs `benchstat` on `PATH`
