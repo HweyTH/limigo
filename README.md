@@ -60,9 +60,9 @@ returns `503` with `allowed: false`, and the error is counted separately from
 a denial so a dashboard never confuses the two. That protects the quota at the
 cost of availability, which is right for some deployments and not others. The
 reasoning, the counter-position, and the condition under which the opposite
-choice is correct are in [Fail closed](#fail-closed-when-the-store-is-unreachable);
-`bench/run-outage.sh` measures what a node actually does across a Redis kill
-and restart.
+choice is correct are in [Fail closed](#fail-closed-when-the-store-is-unreachable),
+and what a node actually does across a Redis kill and restart is measured in
+[§7](#7-failure-mode--redis-outage).
 
 ## Architecture
 
@@ -446,8 +446,9 @@ an outage it keeps admitting from the balance it last heard about, then denies
 with **`429`** — not 503 — once that local view runs dry, because the local
 cache learns of refills only from a successful sync. So a cached rule degrades
 into a stricter limiter rather than a closed one, and its flush errors are
-logged while the node keeps serving. `bench/run-outage.sh` puts both arms
-through the same kill-and-restart and records the difference per second.
+logged while the node keeps serving. `bench/run-failure-mode.sh` puts both arms
+through the same kill-and-restart and records where each one flips and
+recovers.
 
 **A second decision that shares the name: no rule matched.** Traffic no
 configured rule covers gets **`200`** with `allowed: false, matched: false`.
@@ -870,6 +871,125 @@ so its parallel benchmark pre-allocates one instance per key
 cores instead of queuing. That contrast is the cleanest evidence that the
 other five rows measure the lock, not the algorithm.
 
+### 7. Failure mode — Redis outage
+
+The measurement behind [Fail closed](#fail-closed-when-the-store-is-unreachable). Every table above
+measures Limigo while its store works; this one kills the store mid-run. Same
+controlled pair as §2 and §5 — `burst-tier-token-bucket` and
+`cached-tier-token-bucket`, identical but for `local_cache` — both probed at
+100 req/s against a single key, held below their shared 200/s refill so that
+with Redis healthy every request is on the allow path and any non-200 belongs
+to the outage. Redis is stopped 10s in and started again 25s later.
+
+The outage boundaries are read out of the **uncached arm's own timeline**, not
+the host clock. Every uncached decision needs a live round-trip, so that arm's
+first failure is the first probe issued after the store went away — a marker in
+the same clock as the timestamps measured against it, accurate to the 10ms
+probe interval. The cost is that the uncached arm cannot measure its own flip
+time; it defines the zero.
+
+| arm | first failure | outage: allowed | outage: 429 | outage: 503 |
+|---|---|---|---|---|
+| uncached | 503 (defines the marker) | 0 | 0 | 2,930 |
+| cached (`local_cache: true`) | 429, after **9.99s** | 999 | 1,931 | 0 |
+
+**The uncached arm admitted nothing.** Not one request slipped through in 29.3
+seconds without a reachable store, and every failure was a 503 counted under
+`result="error"` — no 429s, so no store failure was ever reported to a caller
+as a rate-limit denial.
+
+**The cached arm degrades along a completely different axis, and the number is
+predictable in advance.** Its request path never touches Redis, so it kept
+serving normally until its local baseline ran out, then denied with 429 — a
+rate-limit answer, not an error — for the remaining 19 seconds. A cached bucket
+decides against a snapshot of the authoritative token count and does not
+simulate refill locally, so with the snapshot at capacity when the store
+disappears it can admit `capacity / rate` = 1000 / 100 = **10.0s** of requests.
+It admitted 9.99s worth. That figure is hardware-independent, and it is the
+practical form of the trade-off: `local_cache: true` buys a rule roughly
+`capacity / offered rate` of survival, and then fails closed like everything
+else.
+
+**Recovery,** measured from the first probe that succeeded again:
+
+| arm | back to 200 | post-restart 200s | post-restart non-200s | of those, after the first 200 |
+|---|---|---|---|---|
+| uncached | marker | 600 | 1 | 1 |
+| cached | 114ms | 589 | 11 | 0 |
+
+The two arms' non-200s here are not the same event, which is why the last
+column exists. The cached arm's 11 all fall *before* its first success: it
+needs one flush to reach Redis and refresh its baseline, and until that lands
+it keeps denying from the exhausted snapshot. 114ms, about eleven flush
+intervals, then clean. The uncached arm's single failure falls *after* its
+first success — its recovery was not quite monotonic, one more 503 from a
+connection opened against a Redis that was accepting some but not all of them
+yet. Small, and published rather than smoothed away.
+
+The metrics tell the same story through a wider window: the recovery-side
+delta records 7 `result="error"` requests for the uncached rule against that 1
+in the timeline. There is no contradiction — that scrape is bracketed by the
+`docker compose start` command returning, which is a few hundred milliseconds
+ahead of the marker, so it catches the tail of the outage as well as the
+recovery.
+
+**What happened to the counter state is the part worth reading twice, and the
+answer is that you do not get to know.** The restarted Redis reported
+`rdb_last_load_keys_loaded: 2` on the committed run — the dataset survived.
+Earlier runs of the same command reported `0`, and six stop/start cycles on an
+otherwise idle machine lost it every single time. That is not flakiness in the
+harness: `docker compose stop -t 0` sends SIGTERM and follows it with SIGKILL
+immediately, while a stock `redis:7-alpine` has save points configured and so
+tries to write its dataset out when it sees the SIGTERM. Which signal wins is
+a race, and it tips toward Redis precisely when the machine is loaded enough
+to delay the kill.
+
+**The finding is the race, not the side this run landed on.** An unpersisted
+store, stopped abruptly, guarantees nothing either way — and the two outcomes
+are not equivalent, because a lost dataset means every bucket in the fleet is
+recreated at full capacity by the first request that touches it, so the outage
+itself hands back a full quota. This is a property of the deployment rather
+than of Limigo, and it is the strongest argument in this document for running
+the store with persistence or replication if the quota actually matters to
+you.
+
+Note also that the bucket values could not have answered this on their own,
+which is why the harness asks Redis directly. A token bucket whose key was
+lost is recreated at capacity; one whose key survived refills to capacity
+across any gap longer than `capacity / rate` (5s here, against a 29s outage).
+Both roads lead to a full bucket, so for this algorithm at this outage length
+the two outcomes are invisible from the client side — which is exactly what
+makes the race easy to miss.
+
+**The cached arm's outage-time admits were not lost.** A failed flush leaves
+the pending delta intact, so the 999 requests it admitted locally while the
+store was gone should all be charged to Redis by the first flush that succeeds
+afterwards — settled late rather than written off. Its bucket read **589.4
+tokens** at the end of the run, and that number only fits one story.
+
+The bucket sat at its 1000-token cap when the first successful flush landed
+(29s of outage against a 5s full refill puts it there whether its key survived
+or not), then refilled at 200/s while the probe's admits drew it down. Had the
+pending delta been dropped on the failed flushes, nothing would have charged
+the bucket faster than it refilled and it would have stayed pinned at the cap
+— which is exactly what the uncached arm's 999 does. Had it been charged
+twice, ~2000 tokens against a bucket that could refill at most ~1200 across
+the recovery window would have left the count deep in negative territory,
+which `token_bucket_sync.lua` explicitly permits and would have reported. It
+read 589.4: one charge, on the order of the 999 admits.
+
+The exact delta can't be solved for from this, and the results file is hedged
+accordingly. The Redis read happens a second or two after the last probe, and
+200/s of refill through that dead time is worth hundreds of tokens — enough to
+move any precise answer, not nearly enough to move a three-way distinction
+whose arms are a thousand tokens apart.
+
+Note that the uncached arm's 999 is *not* the control it looks like. At a
+100/s probe against a 200/s refill that bucket is saturated at its cap, so it
+would read 999 whatever happened during the outage. The cached arm's number is
+informative only because the flush knocked it far enough below the cap to
+still be climbing when the run ended.
+
 ### Hardware and reproduction
 
 All numbers above were measured on:
@@ -884,7 +1004,7 @@ bench/run-throughput.sh   # §1, §1b, §3, §4, §5: control rows, Redis bound,
 bench/run-overshoot.sh --requests 4000 --seconds 2 --max-workers 200   # §2: overshoot / consistency
 bench/run-flush-sweep.sh  # §2: accuracy/latency sweep across --cache-flush-interval
 bench/run-microbench.sh   # §6: Go microbenchmarks at -count=10, reduced with benchstat
-bench/run-outage.sh       # failure mode: kill and restart Redis under load, per-second timeline for both arms
+bench/run-failure-mode.sh # §7: Redis-outage failure mode, flip and recovery
 bench/run-rolling-restart.sh  # readiness: restart replicas one at a time under load, count dropped requests
 ```
 
@@ -895,7 +1015,9 @@ run the pure-algorithm layer without Docker.
 The full per-run output backing §1, §1b, §3, §4 and §5 is
 [`bench/results/2026-08-30-085730-Thais-MacBook-Air-3-throughput.md`](bench/results/2026-08-30-085730-Thais-MacBook-Air-3-throughput.md);
 §6 is
-[`bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md`](bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md).
+[`bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md`](bench/results/2026-08-30-085312-Thais-MacBook-Air-3-microbench.md);
+§7 is
+[`bench/results/2026-08-31-111538-Thais-MacBook-Air-3-failure-mode.md`](bench/results/2026-08-31-111538-Thais-MacBook-Air-3-failure-mode.md).
 
 Raw output — vegeta binaries, generated targets, decoded latency samples — is
 kept under [`bench/results/`](bench/results/) and `bench/results/raw/`
