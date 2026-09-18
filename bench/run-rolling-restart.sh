@@ -214,7 +214,7 @@ if [[ "$EXIT_CODE" != "0" ]]; then
 	exit 1
 fi
 
-# Decode and bucket per second, as bench/run-outage.sh does. Columns:
+# Decode and bucket per second. Columns:
 # second|200|429|5xx|other, where 5xx is any 500–599 (a replica's 503, or
 # Traefik's 502/504 when it had nowhere to send the request) and other is
 # everything else including code 0 (no HTTP response).
