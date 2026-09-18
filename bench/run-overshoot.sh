@@ -270,10 +270,17 @@ row_field() { cut -d'|' -f"$2" <<<"$1"; }
 #
 # check_escalation <label> <o1> <o2> <o3> — prints a one-line finding, or
 # nothing, to stdout.
+# The floor below which a deviation is treated as noise is three requests'
+# worth of the ceiling, expressed as a percentage, because that is the
+# granularity the measurement actually has: the pacer alone lands one or two
+# requests short of the target per run (see the "sent N of M" notes), so a
+# 1-request-to-3-request change between node counts is a ratio of two noise
+# values, not an acceleration. An earlier fixed floor of 0.01% sat below a
+# single request's share and flagged exactly that.
 check_escalation() {
 	local label="$1" o1="$2" o2="$3" o3="$4"
-	awk -v label="$label" -v o1="$o1" -v o2="$o2" -v o3="$o3" 'BEGIN {
-		floor = 0.01
+	awk -v label="$label" -v o1="$o1" -v o2="$o2" -v o3="$o3" -v ceiling="$EXPECTED_CEILING" 'BEGIN {
+		floor = 300 / ceiling
 		a1 = (o1 < 0 ? -o1 : o1); if (a1 < floor) a1 = floor
 		a2 = (o2 < 0 ? -o2 : o2); if (a2 < floor) a2 = floor
 		a3 = (o3 < 0 ? -o3 : o3)
@@ -389,7 +396,7 @@ CACHED_BOUND="$(awk -v o1="$(row_field "${CACHED_ROWS[0]}" 8)" -v o2="$(row_fiel
 		echo "## Escalation check"
 		echo
 		echo "No unbounded or super-linear deviation detected in either arm across 1/2/3"
-		echo "nodes (heuristic: accelerating growth ratio, or |overshoot| exceeding 15% of"
+		echo "nodes (heuristic: accelerating growth ratio above a three-request noise floor, or |overshoot| exceeding 15% of"
 		echo "the configured limit — see script). This does not replace human judgement of"
 		echo "the table above."
 	fi
