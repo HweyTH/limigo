@@ -7,6 +7,6 @@ FROM golang:1.25-alpine AS build
 # command — that command must resolve to a fixed build).
 RUN go install github.com/tsenart/vegeta/v12@v12.13.0
 
-FROM alpine:3.20
+FROM alpine:3.24
 COPY --from=build /go/bin/vegeta /usr/local/bin/vegeta
 ENTRYPOINT ["vegeta"]
